@@ -1241,6 +1241,8 @@
       if (token !== tourToken) return;
       tourRoute = { tourId: id, status: "done", data };
       tourStats.set(id, { distance: data.distance, duration: data.duration });
+      // Route kann über die Stationen hinausreichen: ganze Route zeigen
+      if (fit) fitTourBounds(data.geometry.coordinates.map(([lng, lat]) => ({ lat, lng })));
     } catch (err) {
       if (token !== tourToken) return;
       tourRoute = { tourId: id, status: "error", error: err.message };
