@@ -71,6 +71,15 @@
   let searchOptions = []; // auswählbare Einträge in der Ergebnisliste
   let activeOption = -1; // per Tastatur markierter Eintrag
 
+  const tours = new Map(); // id → Tour
+  const tourStats = new Map(); // id → { distance, duration } nach Routenberechnung
+  let toursOpen = false;
+  let tourView = { name: "overview" }; // overview | detail {id} | edit {draft}
+  let shownTourId = null; // Tour, die auf der Karte angezeigt wird
+  let tourRoute = null; // { tourId, status, data, error }
+  let tourToken = 0;
+  let tourPinned = new Set(); // POIs, die gerade als nummerierte Station gezeigt werden
+
   const mobileQuery = window.matchMedia("(max-width: 640px)");
   const isMobile = () => mobileQuery.matches;
 
@@ -274,7 +283,7 @@
     const marker = markers.get(id);
     const poi = pois.get(id);
     if (!marker || !poi) return;
-    const show = !hiddenCategories.has(poi.category) && !(editing && editing.id === id);
+    const show = !hiddenCategories.has(poi.category) && !(editing && editing.id === id) && !tourPinned.has(id);
     if (show && !map.hasLayer(marker)) marker.addTo(map);
     if (!show && map.hasLayer(marker)) marker.remove();
     const element = marker.getElement();
@@ -289,13 +298,19 @@
       marker.setIcon(pinIcon(categoryOf(poi), false));
     } else {
       marker = L.marker([poi.lat, poi.lng], { icon: pinIcon(categoryOf(poi), false), riseOnHover: true })
-        .bindPopup(() => buildPopup(pois.get(poi.id)), { minWidth: 220, maxWidth: 280 })
+        .on("click", () => onPoiMarkerClick(poi.id))
         .on("popupopen", () => setActivePoi(poi.id))
         .on("popupclose", () => { if (activePoiId === poi.id) setActivePoi(null); });
       markers.set(poi.id, marker);
+      if (!isTourPicking()) bindPoiPopup(marker, poi.id);
     }
     syncMarker(poi.id);
     renderList();
+    onPoiChangedForTours(poi.id);
+  }
+
+  function bindPoiPopup(marker, id) {
+    marker.bindPopup(() => buildPopup(pois.get(id)), { minWidth: 220, maxWidth: 280 });
   }
 
   function removePoi(id) {
@@ -305,6 +320,7 @@
     pois.delete(id);
     renderFilter();
     renderList();
+    onPoiRemovedForTours(id);
   }
 
   async function deletePoi(id, button) {
@@ -326,10 +342,12 @@
 
   async function loadData() {
     try {
-      const [categoryList, poiData] = await Promise.all([
+      const [categoryList, poiData, tourData] = await Promise.all([
         api("GET", "/api/categories"),
-        api("GET", "/api/pois")
+        api("GET", "/api/pois"),
+        api("GET", "/api/tours")
       ]);
+      for (const tour of tourData) tours.set(tour.id, tour);
       for (const category of categoryList) categories.set(category.id, category);
       for (const id of [...hiddenCategories]) {
         if (!categories.has(id)) hiddenCategories.delete(id);
@@ -429,8 +447,14 @@
   // Bewegt die Karte so, dass latlng gut sichtbar ist: nicht unter der
   // Seitenleiste und mit Platz für das Popup darüber.
   function flyToVisible(latlng, zoom, done) {
-    const leftCover = listOpen && !isMobile() ? listPanel.offsetWidth : 0;
-    const centerPoint = map.project(latlng, zoom).subtract(L.point(leftCover / 2, 90));
+    const size = map.getSize();
+    const left = sidebarCover();
+    const freeHeight = size.y - bottomCover();
+    // Zielposition im freien Bereich; mit Popup etwas tiefer, damit es darüber passt
+    const x = left + (size.x - left) / 2;
+    const y = Math.min(freeHeight / 2 + (done ? 90 : 0), freeHeight - 30);
+    const offset = L.point(x, y).subtract(size.divideBy(2));
+    const centerPoint = map.project(latlng, zoom).subtract(offset);
     const target = map.unproject(centerPoint, zoom);
 
     const current = map.project(map.getCenter(), zoom);
@@ -441,6 +465,14 @@
     if (done) map.once("moveend", done);
     if (map.getCenter().distanceTo(target) > 3000) map.flyTo(target, zoom, { duration: 0.8 });
     else map.setView(target, zoom, { animate: true });
+  }
+
+  // Breite der Seitenleiste (Liste oder Touren), die links die Karte verdeckt
+  function sidebarCover() {
+    if (isMobile()) return 0;
+    if (listOpen) return listPanel.offsetWidth;
+    if (toursOpen) return toursPanel.offsetWidth;
+    return 0;
   }
 
   function focusPoi(id) {
@@ -456,8 +488,8 @@
     if (isMobile()) setListOpen(false);
     const zoom = Math.max(map.getZoom(), 16);
     flyToVisible(L.latLng(poi.lat, poi.lng), zoom, () => {
-      const marker = markers.get(id);
-      if (marker && map.hasLayer(marker)) marker.openPopup();
+      const marker = visibleMarkerFor(id);
+      if (marker) marker.openPopup();
     });
   }
 
@@ -470,8 +502,9 @@
     listOpen = open;
     listPanel.classList.toggle("is-open", open);
     listPanel.inert = !open;
-    document.body.classList.toggle("list-open", open);
     btnList.setAttribute("aria-expanded", String(open));
+    if (open) setToursOpen(false);
+    updateSidebarClass();
     if (open) {
       setFilterOpen(false);
       if (isMobile()) closeSearch();
@@ -891,6 +924,13 @@
 
   function startRoute(target) {
     map.closePopup();
+    if (shownTourId) {
+      hideTour();
+      if (toursOpen && tourView.name === "detail") {
+        tourView = { name: "overview" };
+        renderTours();
+      }
+    }
     setPicking(false);
     if (editing) closeForm();
     if (isMobile()) setListOpen(false);
@@ -982,7 +1022,7 @@
 
     // Ganze Route zeigen, ohne dass Liste oder Routen-Karte sie verdecken
     const bounds = L.latLngBounds(line).extend(from).extend([to.lat, to.lng]);
-    const leftCover = listOpen && !isMobile() ? listPanel.offsetWidth : 0;
+    const leftCover = sidebarCover();
     map.fitBounds(bounds, {
       paddingTopLeft: [leftCover + 40, 40],
       paddingBottomRight: [40, routePanel.offsetHeight + 50],
@@ -1012,6 +1052,602 @@
   routeClose.addEventListener("click", closeRoute);
 
   // -------------------------------------------------------------------------
+  // Touren: geordnete Abfolge von mindestens zwei POIs
+  // -------------------------------------------------------------------------
+
+  const toursPanel = $("tours-panel");
+  const toursBody = $("tours-body");
+  const toursTitle = $("tours-title");
+  const btnTours = $("btn-tours");
+  const toursClose = $("tours-close");
+
+  const tourLayer = L.layerGroup().addTo(map);
+  const tourPinMarkers = new Map(); // POI-ID → nummerierter Marker der angezeigten Tour
+  const MAX_TOUR_STOPS = 25;
+  let tourPickingActive = false; // Klicks auf Marker fügen Stationen hinzu
+  let draftCounter = 0;
+
+  const MODE_ICONS = {
+    foot: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="13.5" cy="4.5" r="1.8"/><path d="M9.5 21l2.2-6.2 2.8 2.7V21M8 11.5l2.6-3.7 3.6 1.3 1.6 3.4 2.2.8M11.7 14.8 10.6 7.8"/></svg>',
+    bike: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="16.5" r="3.5"/><circle cx="18.5" cy="16.5" r="3.5"/><path d="M5.5 16.5 9 9.5h6.5l3 7M9 9.5 12 16.5h1.5L16 9.5M7.5 6.5H10"/></svg>',
+    car: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 16.5v-4l2.2-5.5h12.6l2.2 5.5v4zM3.5 16.5V19M20.5 16.5V19M3.5 12.5h17M7.5 14.5h.01M16.5 14.5h.01"/></svg>'
+  };
+  const TOOL_ICONS = {
+    up: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
+    down: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
+    remove: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+    chevron: '<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>'
+  };
+
+  const isTourPicking = () => tourPickingActive;
+
+  function updateSidebarClass() {
+    document.body.classList.toggle("sidebar-open", listOpen || toursOpen);
+  }
+
+  // Höhe des Touren-Panels, das auf dem Smartphone unten die Karte verdeckt
+  function bottomCover() {
+    return isMobile() && toursOpen && toursPanel.classList.contains("is-sheet") ? toursPanel.offsetHeight : 0;
+  }
+
+  // Sichtbarer Marker eines POIs: normal oder als nummerierte Tour-Station
+  function visibleMarkerFor(id) {
+    const marker = markers.get(id);
+    if (marker && map.hasLayer(marker)) return marker;
+    return tourPinMarkers.get(id) || null;
+  }
+
+  function setToursOpen(open) {
+    if (open === toursOpen) return;
+    if (!open && tourView.name === "edit") cancelTourEdit(false);
+    toursOpen = open;
+    toursPanel.classList.toggle("is-open", open);
+    toursPanel.inert = !open;
+    btnTours.setAttribute("aria-expanded", String(open));
+    if (open) {
+      setListOpen(false);
+      setFilterOpen(false);
+      if (isMobile()) closeSearch();
+    }
+    updateSidebarClass();
+    updateTourPicking();
+    if (open) renderTours();
+    else toursPanel.classList.remove("is-sheet");
+  }
+
+  // Escape oder ✕: Bearbeitung abbrechen bzw. Panel schließen
+  function closeToursPanel() {
+    if (tourView.name === "edit") cancelTourEdit();
+    else setToursOpen(false);
+  }
+
+  btnTours.addEventListener("click", () => setToursOpen(!toursOpen));
+  toursClose.addEventListener("click", () => {
+    setToursOpen(false);
+    btnTours.focus();
+  });
+
+  // Während eine Tour bearbeitet wird, fügen Klicks auf Marker Stationen
+  // hinzu, statt das Popup zu öffnen.
+  function updateTourPicking() {
+    const on = toursOpen && tourView.name === "edit";
+    if (on === tourPickingActive) return;
+    tourPickingActive = on;
+    document.body.classList.toggle("tour-picking", on);
+    for (const [id, marker] of markers) {
+      if (on) marker.unbindPopup();
+      else bindPoiPopup(marker, id);
+    }
+    if (on) {
+      map.closePopup();
+      setPicking(false);
+      if (editing) closeForm();
+    }
+  }
+
+  function onPoiMarkerClick(id) {
+    if (tourPickingActive) addTourStop(id);
+  }
+
+  const numberIconCache = new Map();
+  function numberIcon(category, number) {
+    const color = category ? safeColor(category.color) : "#1f2328";
+    const key = `${color}|${number}`;
+    if (!numberIconCache.has(key)) {
+      numberIconCache.set(key, L.divIcon({
+        className: "poi-pin tour-pin",
+        html: `<svg viewBox="0 0 30 40" aria-hidden="true"><path class="pin-body" style="fill:${color}" d="${PIN_PATH}"/>` +
+          `<circle cx="15" cy="14.5" r="9" fill="#fff"/>` +
+          `<text x="15" y="18.6" text-anchor="middle" font-size="11.5" font-weight="700" fill="${color}" ` +
+          `font-family="system-ui, sans-serif">${number}</text></svg>`,
+        iconSize: [30, 40],
+        iconAnchor: [15, 38],
+        popupAnchor: [0, -36]
+      }));
+    }
+    return numberIconCache.get(key);
+  }
+
+  const stopsOf = (ids) => ids.map((id) => pois.get(id)).filter(Boolean);
+
+  // Zeichnet die angezeigte Tour bzw. den Entwurf im Editor auf die Karte.
+  function renderTourLayer() {
+    tourLayer.clearLayers();
+    tourPinMarkers.clear();
+    const previous = tourPinned;
+    tourPinned = new Set();
+
+    const draft = tourView.name === "edit" ? tourView.draft : null;
+    const tour = !draft && shownTourId ? tours.get(shownTourId) : null;
+    const stops = stopsOf(draft ? draft.poiIds : tour ? tour.poiIds : []);
+
+    if (draft && stops.length > 1) {
+      // Im Editor nur eine gestrichelte Verbindung; die echte Route folgt beim Speichern.
+      L.polyline(stops.map((p) => [p.lat, p.lng]), {
+        color: "#1f2328", weight: 3, opacity: 0.6, dashArray: "6 8", interactive: false
+      }).addTo(tourLayer);
+    }
+    if (tour && tourRoute && tourRoute.tourId === tour.id && tourRoute.status === "done") {
+      const line = tourRoute.data.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+      const color = (MODES[tour.mode] || MODES.foot).color;
+      L.polyline(line, { color: "#fff", weight: 9, opacity: 0.9, interactive: false }).addTo(tourLayer);
+      L.polyline(line, { color, weight: 5, opacity: 0.95, interactive: false }).addTo(tourLayer);
+    }
+
+    stops.forEach((poi, index) => {
+      tourPinned.add(poi.id);
+      const marker = L.marker([poi.lat, poi.lng], {
+        icon: numberIcon(categoryOf(poi), index + 1),
+        zIndexOffset: 800,
+        riseOnHover: true,
+        title: `${index + 1}. ${poi.title}`
+      }).addTo(tourLayer);
+      if (draft) marker.on("click", () => removeTourStop(poi.id));
+      else marker.bindPopup(() => buildPopup(pois.get(poi.id)), { minWidth: 220, maxWidth: 280 });
+      tourPinMarkers.set(poi.id, marker);
+    });
+
+    for (const id of new Set([...previous, ...tourPinned])) syncMarker(id);
+  }
+
+  function fitTourBounds(stops) {
+    if (!stops.length) return;
+    const options = {
+      paddingTopLeft: [sidebarCover() + 50, 50],
+      paddingBottomRight: [50, bottomCover() + 50],
+      maxZoom: 16
+    };
+    if (stops.length === 1) flyToVisible(L.latLng(stops[0].lat, stops[0].lng), 16);
+    else map.fitBounds(L.latLngBounds(stops.map((p) => [p.lat, p.lng])), options);
+  }
+
+  async function showTourOnMap(id, { fit = true } = {}) {
+    const tour = tours.get(id);
+    if (!tour) return;
+    if (route) closeRoute();
+    shownTourId = id;
+    const token = ++tourToken;
+    const stops = stopsOf(tour.poiIds);
+    tourRoute = { tourId: id, status: stops.length < 2 ? "incomplete" : "loading" };
+    renderTourLayer();
+    if (tourView.name === "detail") renderTours();
+    if (fit) fitTourBounds(stops);
+    if (stops.length < 2) return;
+
+    try {
+      const points = stops.map((p) => `${p.lat},${p.lng}`).join(";");
+      const data = await api("GET", `/api/route?profile=${tour.mode}&points=${points}`);
+      if (token !== tourToken) return;
+      tourRoute = { tourId: id, status: "done", data };
+      tourStats.set(id, { distance: data.distance, duration: data.duration });
+    } catch (err) {
+      if (token !== tourToken) return;
+      tourRoute = { tourId: id, status: "error", error: err.message };
+    }
+    renderTourLayer();
+    if (tourView.name === "detail" && tourView.id === id) renderTours();
+  }
+
+  function hideTour() {
+    tourToken++;
+    shownTourId = null;
+    tourRoute = null;
+    renderTourLayer();
+  }
+
+  function focusTourStop(id) {
+    const marker = tourPinMarkers.get(id);
+    if (!marker) return;
+    flyToVisible(marker.getLatLng(), Math.max(map.getZoom(), 16), () => marker.openPopup());
+  }
+
+  // ---------- Ansichten im Touren-Panel ----------
+
+  function renderTours() {
+    if (tourView.name === "detail" && !tours.has(tourView.id)) tourView = { name: "overview" };
+    toursPanel.classList.toggle("is-sheet", tourView.name !== "overview");
+    if (tourView.name === "overview") renderTourOverview();
+    else if (tourView.name === "detail") renderTourDetail();
+    else renderTourEditor();
+  }
+
+  function renderTourOverview() {
+    toursTitle.textContent = "Touren";
+    toursBody.dataset.view = "overview";
+    const list = [...tours.values()].sort((a, b) => a.name.localeCompare(b.name, "de", { sensitivity: "base" }));
+    toursBody.replaceChildren(
+      el("button", { type: "button", class: "btn btn-primary btn-block", onclick: () => startTourEdit(null) },
+        fromHtml(TOOL_ICONS.plus), "Neue Tour erstellen"),
+      list.length
+        ? el("ul", { class: "tour-list" }, ...list.map(tourCard))
+        : el("p", { class: "tours-empty" }, "Noch keine Touren. Eine Tour verbindet mindestens zwei deiner Orte zu einem Rundgang.")
+    );
+  }
+
+  function tourCard(tour) {
+    const count = stopsOf(tour.poiIds).length;
+    const mode = MODES[tour.mode] || MODES.foot;
+    const stats = tourStats.get(tour.id);
+    const incomplete = count < 2;
+    const meta = [`${count} ${count === 1 ? "Station" : "Stationen"}`, mode.label];
+    if (stats) meta.push(formatDistance(stats.distance), `ca. ${formatDuration(stats.duration)}`);
+    return el("li", null,
+      el("button", {
+        type: "button",
+        class: tour.id === shownTourId ? "tour-card is-active" : "tour-card",
+        onclick: () => openTourDetail(tour.id)
+      },
+        el("span", { class: "mode-badge", "aria-hidden": "true" }, fromHtml(MODE_ICONS[tour.mode] || MODE_ICONS.foot)),
+        el("span", { class: "text" },
+          el("span", { class: "title" }, tour.name),
+          el("span", { class: incomplete ? "meta is-warning" : "meta" },
+            incomplete ? "Unvollständig – braucht mindestens zwei Orte" : meta.join(" · "))
+        ),
+        fromHtml(TOOL_ICONS.chevron)
+      )
+    );
+  }
+
+  function openTourDetail(id) {
+    tourView = { name: "detail", id };
+    renderTours();
+    showTourOnMap(id);
+  }
+
+  function renderTourDetail() {
+    const tour = tours.get(tourView.id);
+    const mode = MODES[tour.mode] || MODES.foot;
+    const stops = stopsOf(tour.poiIds);
+    const current = tourRoute && tourRoute.tourId === tour.id ? tourRoute : null;
+    const legs = current && current.status === "done" ? current.data.legs : null;
+    toursTitle.textContent = "Tour";
+    toursBody.dataset.view = "detail";
+
+    const summary = el("div", { class: "tour-summary", "aria-live": "polite" });
+    if (stops.length < 2) {
+      summary.classList.add("is-warning");
+      summary.append("Diese Tour hat weniger als zwei Orte, weil Orte gelöscht wurden. Bearbeite sie, um Stationen hinzuzufügen.");
+    } else if (!current || current.status === "loading") {
+      summary.append(el("span", { class: "muted" }, "Route wird berechnet …"));
+    } else if (current.status === "error") {
+      summary.classList.add("is-error");
+      summary.append(
+        el("span", null, current.error), " ",
+        el("button", { type: "button", class: "link-btn", onclick: () => showTourOnMap(tour.id, { fit: false }) }, "Erneut versuchen")
+      );
+    } else {
+      summary.append(el("div", { class: "figures" },
+        el("strong", null, formatDistance(current.data.distance)),
+        el("span", null, `ca. ${formatDuration(current.data.duration)} ${mode.phrase}`)
+      ));
+    }
+
+    const stopList = el("ol", { class: "tour-stops" }, ...stops.map((poi, index) => {
+      const category = categoryOf(poi);
+      const leg = legs && index < stops.length - 1 ? legs[index] : null;
+      return el("li", { class: "tour-stop" },
+        el("span", { class: "stop-number", style: category ? `--cat:${safeColor(category.color)}` : null, "aria-hidden": "true" },
+          String(index + 1)),
+        el("button", {
+          type: "button",
+          class: "stop-link stop-main",
+          "aria-label": `Station ${index + 1}: ${poi.title} auf der Karte zeigen`,
+          onclick: () => focusTourStop(poi.id)
+        },
+          el("span", { class: "title" }, poi.title),
+          el("span", { class: "sub" }, [category && category.name, poi.address].filter(Boolean).join(" · ")),
+          leg ? el("span", { class: "leg" }, `↓ ${formatDistance(leg.distance)} · ca. ${formatDuration(leg.duration)}`) : null
+        )
+      );
+    }));
+
+    const btnEdit = el("button", { type: "button", class: "btn", onclick: () => startTourEdit(tour.id) }, "Bearbeiten");
+    const btnDelete = el("button", { type: "button", class: "btn", onclick: () => showConfirm(true) }, "Löschen");
+    const btnConfirm = el("button", { type: "button", class: "btn btn-danger", onclick: () => deleteTour(tour.id, btnConfirm) }, "Ja, löschen");
+    const confirmBox = el("div", { class: "confirm", hidden: true },
+      el("p", null, "Diese Tour wirklich löschen? Die Orte selbst bleiben erhalten."),
+      el("div", { class: "row" }, btnConfirm,
+        el("button", { type: "button", class: "btn", onclick: () => showConfirm(false) }, "Abbrechen"))
+    );
+    function showConfirm(show) {
+      confirmBox.hidden = !show;
+      btnEdit.hidden = show;
+      btnDelete.hidden = show;
+      (show ? btnConfirm : btnDelete).focus();
+    }
+
+    toursBody.replaceChildren(
+      el("button", {
+        type: "button",
+        class: "link-btn back-btn",
+        onclick: () => {
+          hideTour();
+          tourView = { name: "overview" };
+          renderTours();
+        }
+      }, "‹ Alle Touren"),
+      el("div", { class: "tour-detail-head" },
+        el("h3", null, tour.name),
+        el("div", { class: "meta inline-mode" }, fromHtml(MODE_ICONS[tour.mode] || MODE_ICONS.foot),
+          `Empfohlen: ${mode.label} · ${stops.length} ${stops.length === 1 ? "Station" : "Stationen"}`)
+      ),
+      summary,
+      el("p", { class: "section-label" }, "Stationen"),
+      stopList,
+      el("div", { class: "tour-actions" }, btnEdit, btnDelete, confirmBox)
+    );
+  }
+
+  async function deleteTour(id, button) {
+    button.disabled = true;
+    try {
+      await api("DELETE", `/api/tours/${encodeURIComponent(id)}`);
+    } catch (err) {
+      if (err.status !== 404) {
+        toast(err.message, true);
+        button.disabled = false;
+        return;
+      }
+    }
+    tours.delete(id);
+    tourStats.delete(id);
+    if (shownTourId === id) hideTour();
+    tourView = { name: "overview" };
+    renderTours();
+    toast("Tour gelöscht");
+  }
+
+  // ---------- Tour erstellen / bearbeiten ----------
+
+  function startTourEdit(id) {
+    const tour = id ? tours.get(id) : null;
+    const savedMode = storageGet(MODE_KEY);
+    tourView = {
+      name: "edit",
+      draft: {
+        key: String(++draftCounter),
+        id: tour ? tour.id : null,
+        name: tour ? tour.name : "",
+        mode: tour ? tour.mode : (MODES[savedMode] ? savedMode : "foot"),
+        poiIds: tour ? stopsOf(tour.poiIds).map((p) => p.id) : []
+      }
+    };
+    if (route) closeRoute();
+    if (!toursOpen) setToursOpen(true);
+    else {
+      updateTourPicking();
+      renderTours();
+    }
+    renderTourLayer();
+  }
+
+  function cancelTourEdit(render = true) {
+    const { id } = tourView.draft;
+    tourView = id && tours.has(id) && shownTourId === id ? { name: "detail", id } : { name: "overview" };
+    if (tourView.name === "overview" && shownTourId) hideTour();
+    updateTourPicking();
+    renderTourLayer();
+    if (render) renderTours();
+  }
+
+  function renderTourEditor() {
+    const draft = tourView.draft;
+    toursTitle.textContent = draft.id ? "Tour bearbeiten" : "Neue Tour";
+    if (toursBody.dataset.view === "edit" && toursBody.dataset.draft === draft.key) {
+      renderTourStopsEditor();
+      return;
+    }
+    toursBody.dataset.view = "edit";
+    toursBody.dataset.draft = draft.key;
+
+    const nameInput = el("input", {
+      type: "text", maxlength: "80", value: draft.name, autocomplete: "off",
+      placeholder: "z. B. Rundgang durch die Innenstadt"
+    });
+    nameInput.addEventListener("input", () => {
+      draft.name = nameInput.value;
+      nameInput.removeAttribute("aria-invalid");
+    });
+
+    const modeSwitch = el("div", { class: "mode-switch", role: "group", "aria-label": "Empfohlene Fortbewegungsart" },
+      ...Object.entries(MODES).map(([key, mode]) =>
+        el("button", {
+          type: "button",
+          class: "mode-btn",
+          "data-mode": key,
+          "aria-pressed": String(draft.mode === key),
+          onclick: () => {
+            draft.mode = key;
+            for (const button of modeSwitch.querySelectorAll(".mode-btn")) {
+              button.setAttribute("aria-pressed", String(button.dataset.mode === key));
+            }
+          }
+        }, fromHtml(MODE_ICONS[key]), el("span", null, mode.label))
+      )
+    );
+
+    const hint = el("p", { class: "tour-hint" },
+      el("strong", null, "Orte hinzufügen: "),
+      "Klicke auf der Karte nacheinander auf die Orte der Tour. Ein Klick auf eine nummerierte Station entfernt sie wieder.");
+    if (hiddenCategories.size) hint.append(" Ausgefilterte Kategorien sind gerade nicht sichtbar.");
+
+    toursBody.replaceChildren(
+      el("label", { class: "field" }, el("span", null, "Name ", el("em", null, "*")), nameInput),
+      el("div", { class: "field" }, el("span", null, "Empfohlene Fortbewegung"), modeSwitch),
+      hint,
+      el("div", { id: "tour-stops-editor" }),
+      el("p", { class: "form-error", id: "tour-error", role: "alert", hidden: true }),
+      el("div", { class: "tour-actions" },
+        el("button", { type: "button", class: "btn", onclick: () => cancelTourEdit() }, "Abbrechen"),
+        el("button", { type: "button", class: "btn btn-primary", id: "tour-save", onclick: saveTour }, "Speichern")
+      )
+    );
+    renderTourStopsEditor();
+    if (!draft.name && window.matchMedia("(pointer: fine)").matches) nameInput.focus();
+  }
+
+  function renderTourStopsEditor(focus) {
+    const container = $("tour-stops-editor");
+    if (!container || tourView.name !== "edit") return;
+    const stops = stopsOf(tourView.draft.poiIds);
+    const label = el("p", { class: "section-label" }, `Stationen (${stops.length})`);
+    if (!stops.length) {
+      container.replaceChildren(label, el("p", { class: "tours-empty" }, "Noch keine Stationen ausgewählt."));
+      return;
+    }
+
+    const list = el("ol", { class: "tour-stops" }, ...stops.map((poi, index) => {
+      const category = categoryOf(poi);
+      const tool = (icon, text, disabled, action, run) => el("button", {
+        type: "button", class: "icon-btn", "aria-label": text, title: text,
+        disabled, "data-id": poi.id, "data-action": action, onclick: run
+      }, fromHtml(TOOL_ICONS[icon]));
+      return el("li", { class: "tour-stop" },
+        el("span", { class: "stop-number", style: category ? `--cat:${safeColor(category.color)}` : null, "aria-hidden": "true" },
+          String(index + 1)),
+        el("span", { class: "stop-main" },
+          el("span", { class: "title" }, poi.title),
+          el("span", { class: "sub" }, [category && category.name, poi.address].filter(Boolean).join(" · "))
+        ),
+        el("span", { class: "stop-tools" },
+          tool("up", `${poi.title} nach oben`, index === 0, "up", () => moveTourStop(poi.id, -1)),
+          tool("down", `${poi.title} nach unten`, index === stops.length - 1, "down", () => moveTourStop(poi.id, 1)),
+          tool("remove", `${poi.title} entfernen`, false, "remove", () => removeTourStop(poi.id))
+        )
+      );
+    }));
+    container.replaceChildren(label, list);
+    if (stops.length === 1) container.append(el("p", { class: "tours-empty" }, "Wähle mindestens einen weiteren Ort."));
+
+    if (focus) {
+      const selector = (action) => `[data-id="${CSS.escape(focus.id)}"][data-action="${action}"]`;
+      const target = container.querySelector(selector(focus.action));
+      (target && !target.disabled ? target : container.querySelector(selector("remove")) || container).focus();
+    }
+  }
+
+  function tourDraftChanged(focus) {
+    renderTourLayer();
+    renderTourStopsEditor(focus);
+    const error = $("tour-error");
+    if (error) error.hidden = true;
+  }
+
+  function addTourStop(id) {
+    const draft = tourView.draft;
+    if (draft.poiIds.includes(id)) return;
+    if (draft.poiIds.length >= MAX_TOUR_STOPS) {
+      toast(`Eine Tour kann höchstens ${MAX_TOUR_STOPS} Orte haben.`, true);
+      return;
+    }
+    draft.poiIds.push(id);
+    tourDraftChanged();
+  }
+
+  function removeTourStop(id) {
+    const draft = tourView.draft;
+    draft.poiIds = draft.poiIds.filter((poiId) => poiId !== id);
+    tourDraftChanged();
+  }
+
+  function moveTourStop(id, step) {
+    const ids = tourView.draft.poiIds;
+    const index = ids.indexOf(id);
+    const target = index + step;
+    if (index < 0 || target < 0 || target >= ids.length) return;
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    tourDraftChanged({ id, action: step < 0 ? "up" : "down" });
+  }
+
+  async function saveTour() {
+    const draft = tourView.draft;
+    const error = $("tour-error");
+    const button = $("tour-save");
+    const name = draft.name.trim();
+    const missing = [];
+    if (!name) missing.push("ein Name");
+    if (draft.poiIds.length < 2) missing.push("mindestens zwei Orte");
+    if (missing.length) {
+      error.textContent = `Es fehlt noch: ${missing.join(" und ")}.`;
+      error.hidden = false;
+      if (!name) {
+        const input = toursBody.querySelector("input");
+        input.setAttribute("aria-invalid", "true");
+        input.focus();
+      }
+      return;
+    }
+
+    button.disabled = true;
+    error.hidden = true;
+    try {
+      const body = { name, mode: draft.mode, poiIds: draft.poiIds };
+      const saved = draft.id
+        ? await api("PUT", `/api/tours/${encodeURIComponent(draft.id)}`, body)
+        : await api("POST", "/api/tours", body);
+      tours.set(saved.id, saved);
+      tourStats.delete(saved.id);
+      tourView = { name: "detail", id: saved.id };
+      updateTourPicking();
+      showTourOnMap(saved.id);
+      toast(draft.id ? "Tour gespeichert" : "Tour erstellt");
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+      button.disabled = false;
+    }
+  }
+
+  // ---------- Änderungen an POIs in Touren übernehmen ----------
+
+  function onPoiChangedForTours(id) {
+    if (tourView.name === "edit" && tourView.draft.poiIds.includes(id)) {
+      renderTourLayer();
+      renderTourStopsEditor();
+    } else if (shownTourId && tours.has(shownTourId) && tours.get(shownTourId).poiIds.includes(id)) {
+      showTourOnMap(shownTourId, { fit: false });
+    }
+  }
+
+  function onPoiRemovedForTours(id) {
+    let changed = false;
+    for (const tour of tours.values()) {
+      if (!tour.poiIds.includes(id)) continue;
+      tour.poiIds = tour.poiIds.filter((poiId) => poiId !== id);
+      tourStats.delete(tour.id);
+      changed = true;
+      if (tour.id === shownTourId && tourView.name !== "edit") showTourOnMap(tour.id, { fit: false });
+    }
+    if (tourView.name === "edit" && tourView.draft.poiIds.includes(id)) {
+      tourView.draft.poiIds = tourView.draft.poiIds.filter((poiId) => poiId !== id);
+      tourDraftChanged();
+    } else if (changed && toursOpen) {
+      renderTours();
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Ort auswählen
   // -------------------------------------------------------------------------
 
@@ -1031,6 +1667,10 @@
     }
     if (categories.size === 0) {
       toast("Die Kategorien sind noch nicht geladen. Bitte lade die Seite neu.", true);
+      return;
+    }
+    if (isTourPicking()) {
+      toast("Speichere oder verwirf zuerst die Tour, die du gerade bearbeitest.", true);
       return;
     }
     setFilterOpen(false);
@@ -1059,6 +1699,7 @@
     else if (picking) setPicking(false);
     else if (editing) closeForm();
     else if (listOpen) setListOpen(false);
+    else if (toursOpen) closeToursPanel();
     else if (route) closeRoute();
   });
 
@@ -1255,7 +1896,8 @@
       closeForm();
       upsertPoi(saved);
       renderFilter();
-      markers.get(saved.id).openPopup();
+      const savedMarker = visibleMarkerFor(saved.id);
+      if (savedMarker) savedMarker.openPopup();
       const message = id ? "Änderungen gespeichert" : "POI angelegt";
       toast(wasHidden ? `${message} – Kategorie „${category.name}“ wird wieder angezeigt` : message);
     } catch (err) {

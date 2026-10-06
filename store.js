@@ -16,7 +16,8 @@ const DB_FILE = path.join(DATA_DIR, "db.json");
 // einen weiteren Schlüssel; fehlende Schlüssel werden beim Laden ergänzt.
 const DEFAULTS = {
   categories: [],
-  pois: []
+  pois: [],
+  tours: []
 };
 
 let data = null;
@@ -43,7 +44,7 @@ async function load({ migrate } = {}) {
   }
   await persist();
   console.log(
-    `Daten geladen aus ${DB_FILE} (${data.pois.length} POIs, ${data.categories.length} Kategorien)`
+    `Daten geladen aus ${DB_FILE} (${data.pois.length} POIs, ${data.categories.length} Kategorien, ${data.tours.length} Touren)`
   );
 }
 

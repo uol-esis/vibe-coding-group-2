@@ -44,6 +44,11 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>
         <span class="btn-label">Liste</span>
       </button>
+      <button type="button" id="btn-tours" class="btn btn-collapse" aria-expanded="false" aria-controls="tours-panel"
+              aria-label="Touren">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4h11.5l-2.5 4 2.5 4H5"/></svg>
+        <span class="btn-label">Touren</span>
+      </button>
       <button type="button" id="btn-filter" class="btn btn-collapse" aria-expanded="false" aria-controls="filter-panel"
               aria-label="Filter">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>
@@ -74,6 +79,16 @@
       <p class="list-hint" id="list-hint" hidden></p>
       <ul class="poi-list" id="poi-list"></ul>
       <p class="list-empty" id="list-empty" hidden>Noch keine Orte. Lege mit „Neuer POI“ den ersten an.</p>
+    </aside>
+
+    <aside id="tours-panel" class="sidebar tours-panel" aria-labelledby="tours-title" inert>
+      <div class="sidebar-head">
+        <h2 id="tours-title">Touren</h2>
+        <button type="button" class="icon-btn" id="tours-close" aria-label="Touren schließen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="tours-body" id="tours-body"></div>
     </aside>
 
     <section id="filter-panel" class="popover" aria-labelledby="filter-title" hidden>

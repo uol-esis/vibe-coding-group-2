@@ -4,7 +4,7 @@ const express = require("express");
 const store = require("./store");
 const { reverseGeocode, searchPlaces } = require("./geocode");
 const categories = require("./categories");
-const { getRoute, RoutingError } = require("./routing");
+const { getRoute, RoutingError, PROFILES, MAX_POINTS } = require("./routing");
 
 const app = express();
 app.set("view engine", "ejs");
@@ -118,9 +118,77 @@ app.delete("/api/pois/:id", async (req, res) => {
     const index = db.pois.findIndex((p) => p.id === req.params.id);
     if (index === -1) return false;
     db.pois.splice(index, 1);
+    // Gelöschte POIs verschwinden auch aus allen Touren.
+    for (const tour of db.tours) {
+      const before = tour.poiIds.length;
+      tour.poiIds = tour.poiIds.filter((poiId) => poiId !== req.params.id);
+      if (tour.poiIds.length !== before) tour.updatedAt = new Date().toISOString();
+    }
     return true;
   });
   if (!removed) return res.status(404).json({ error: "Diesen POI gibt es nicht mehr." });
+  res.status(204).end();
+});
+
+// ---------------------------------------------------------------------------
+// Touren: geordnete Abfolge von mindestens zwei POIs
+// ---------------------------------------------------------------------------
+
+function validateTour(body) {
+  const input = body && typeof body === "object" ? body : {};
+  const errors = [];
+
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  if (!name) errors.push("Name fehlt.");
+  if (name.length > 80) errors.push("Der Name darf höchstens 80 Zeichen lang sein.");
+
+  const mode = typeof input.mode === "string" ? input.mode : "";
+  if (!PROFILES[mode]) errors.push("Bitte wähle eine Fortbewegungsart.");
+
+  const known = new Set(store.get().pois.map((p) => p.id));
+  const poiIds = Array.isArray(input.poiIds) ? input.poiIds.filter((id) => typeof id === "string") : [];
+  if (poiIds.length < 2) errors.push("Eine Tour braucht mindestens zwei Orte.");
+  if (poiIds.length > MAX_POINTS) errors.push(`Eine Tour kann höchstens ${MAX_POINTS} Orte haben.`);
+  if (new Set(poiIds).size !== poiIds.length) errors.push("Jeder Ort darf nur einmal in der Tour vorkommen.");
+  if (poiIds.some((id) => !known.has(id))) errors.push("Mindestens ein Ort existiert nicht mehr.");
+
+  return { errors, value: { name, mode, poiIds } };
+}
+
+app.get("/api/tours", (req, res) => {
+  res.json(store.get().tours);
+});
+
+app.post("/api/tours", async (req, res) => {
+  const { errors, value } = validateTour(req.body);
+  if (errors.length) return res.status(400).json({ error: errors.join(" ") });
+  const now = new Date().toISOString();
+  const tour = { id: crypto.randomUUID(), ...value, createdAt: now, updatedAt: now };
+  await store.update((db) => db.tours.push(tour));
+  res.status(201).json(tour);
+});
+
+app.put("/api/tours/:id", async (req, res) => {
+  const { errors, value } = validateTour(req.body);
+  if (errors.length) return res.status(400).json({ error: errors.join(" ") });
+  const updated = await store.update((db) => {
+    const tour = db.tours.find((t) => t.id === req.params.id);
+    if (!tour) return null;
+    Object.assign(tour, value, { updatedAt: new Date().toISOString() });
+    return tour;
+  });
+  if (!updated) return res.status(404).json({ error: "Diese Tour gibt es nicht mehr." });
+  res.json(updated);
+});
+
+app.delete("/api/tours/:id", async (req, res) => {
+  const removed = await store.update((db) => {
+    const index = db.tours.findIndex((t) => t.id === req.params.id);
+    if (index === -1) return false;
+    db.tours.splice(index, 1);
+    return true;
+  });
+  if (!removed) return res.status(404).json({ error: "Diese Tour gibt es nicht mehr." });
   res.status(204).end();
 });
 
@@ -168,12 +236,19 @@ function parseLatLng(value) {
   return { lat, lng };
 }
 
+// Entweder from=lat,lng&to=lat,lng oder points=lat,lng;lat,lng;… (Touren)
 app.get("/api/route", async (req, res) => {
-  const from = parseLatLng(req.query.from);
-  const to = parseLatLng(req.query.to);
-  if (!from || !to) return res.status(400).json({ error: "Start oder Ziel ist ungültig." });
+  let points;
+  if (typeof req.query.points === "string") {
+    points = req.query.points.split(";").map(parseLatLng);
+  } else {
+    points = [parseLatLng(req.query.from), parseLatLng(req.query.to)];
+  }
+  if (points.length < 2 || points.some((p) => !p)) {
+    return res.status(400).json({ error: "Start oder Ziel ist ungültig." });
+  }
   try {
-    res.json(await getRoute(String(req.query.profile || ""), from, to));
+    res.json(await getRoute(String(req.query.profile || ""), points));
   } catch (err) {
     if (err instanceof RoutingError) return res.status(err.status).json({ error: err.message });
     console.warn("Routenberechnung fehlgeschlagen:", err.message);
@@ -199,7 +274,22 @@ app.use((err, req, res, next) => {
 });
 
 store
-  .load({ migrate: categories.migrate })
+  .load({
+    migrate: (db) => {
+      const changed = categories.migrate(db);
+      // Touren dürfen nur auf vorhandene POIs verweisen.
+      const known = new Set(db.pois.map((p) => p.id));
+      let toursChanged = false;
+      for (const tour of db.tours) {
+        const ids = (tour.poiIds || []).filter((id) => known.has(id));
+        if (ids.length !== (tour.poiIds || []).length) {
+          tour.poiIds = ids;
+          toursChanged = true;
+        }
+      }
+      return changed || toursChanged;
+    }
+  })
   .then(() => {
     app.listen(3000, "0.0.0.0", () => {
       console.log(`Server läuft auf Port 3000`);
