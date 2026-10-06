@@ -2,7 +2,7 @@ const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const store = require("./store");
-const { reverseGeocode } = require("./geocode");
+const { reverseGeocode, searchPlaces } = require("./geocode");
 const categories = require("./categories");
 
 const app = express();
@@ -15,7 +15,9 @@ app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h" }));
 const city = {
   name: "Karlsruhe",
   center: [49.0094, 8.4044],
-  zoom: 14
+  zoom: 14,
+  // Stadtgebiet für die Adresssuche: [[Süd, West], [Nord, Ost]]
+  bounds: [[48.94, 8.27], [49.09, 8.55]]
 };
 
 // Wird beim Docker-Build gesetzt und hängt an CSS/JS-URLs, damit Browser
@@ -137,6 +139,19 @@ app.get("/api/geocode/reverse", async (req, res) => {
   } catch (err) {
     console.warn("Nominatim-Anfrage fehlgeschlagen:", err.message);
     res.status(502).json({ error: "Die Adresse konnte nicht ermittelt werden." });
+  }
+});
+
+app.get("/api/geocode/search", async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  if (query.length < 2 || query.length > 200) {
+    return res.status(400).json({ error: "Bitte gib mindestens zwei Zeichen ein." });
+  }
+  try {
+    res.json(await searchPlaces(query, city.bounds));
+  } catch (err) {
+    console.warn("Nominatim-Suche fehlgeschlagen:", err.message);
+    res.status(502).json({ error: "Die Adresssuche ist gerade nicht erreichbar." });
   }
 });
 

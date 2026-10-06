@@ -37,6 +37,18 @@
   const addressHint = $("address-hint");
   const btnSave = $("btn-save");
   const toastEl = $("toast");
+  const searchForm = $("search");
+  const searchInput = $("search-input");
+  const searchResults = $("search-results");
+  const searchClose = $("search-close");
+  const btnSearch = $("btn-search");
+  const btnList = $("btn-list");
+  const listPanel = $("list-panel");
+  const listClose = $("list-close");
+  const poiList = $("poi-list");
+  const listCount = $("list-count");
+  const listHint = $("list-hint");
+  const listEmpty = $("list-empty");
 
   const AUTHOR_KEY = "stadtapp.author";
   const HIDDEN_KEY = "stadtapp.hiddenCategories";
@@ -52,6 +64,15 @@
   let editing = null; // { id: string|null, draft: Marker } während das Formular offen ist
   let addressTouched = false; // Adresse wurde von Hand geändert
   let geocodeToken = 0; // verwirft veraltete Adressantworten
+  let listOpen = false; // Seitenleiste mit der Liste ist offen
+  let activePoiId = null; // POI, dessen Popup gerade offen ist
+  let searchMarker = null; // Marker für ein gewähltes Adress-Suchergebnis
+  let addressSearch = { query: "", status: "idle", results: [], error: "" };
+  let searchOptions = []; // auswählbare Einträge in der Ergebnisliste
+  let activeOption = -1; // per Tastatur markierter Eintrag
+
+  const mobileQuery = window.matchMedia("(max-width: 640px)");
+  const isMobile = () => mobileQuery.matches;
 
   // -------------------------------------------------------------------------
   // Icons
@@ -73,7 +94,8 @@
 
   const UI_ICONS = {
     place: '<svg viewBox="0 0 24 24"><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>',
-    user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>'
+    user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>',
+    search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>'
   };
 
   const PIN_PATH =
@@ -147,6 +169,12 @@
     return categories.get(poi.category) || categories.get(FALLBACK_CATEGORY) || null;
   }
 
+  // Für Buttons in Popups: Aktionen, die das Popup schließen, erst nach dem
+  // Klick ausführen. Sonst hält Leaflet den Klick für einen Klick in die Karte.
+  function later(fn) {
+    return () => setTimeout(fn, 0);
+  }
+
   function readJson(key, fallback) {
     try {
       const value = JSON.parse(localStorage.getItem(key));
@@ -213,7 +241,7 @@
     root.append(el("p", { class: "meta" }, uiIcon("user"), el("span", null, `von ${poi.author}`)));
 
     const actions = el("div", { class: "actions" },
-      el("button", { type: "button", class: "btn btn-sm", onclick: () => startEdit(poi.id) }, "Bearbeiten"),
+      el("button", { type: "button", class: "btn btn-sm", onclick: later(() => startEdit(poi.id)) }, "Bearbeiten"),
       el("button", { type: "button", class: "btn btn-sm", onclick: () => showConfirm(true) }, "Löschen")
     );
 
@@ -261,10 +289,13 @@
       marker.setIcon(pinIcon(categoryOf(poi), false));
     } else {
       marker = L.marker([poi.lat, poi.lng], { icon: pinIcon(categoryOf(poi), false), riseOnHover: true })
-        .bindPopup(() => buildPopup(pois.get(poi.id)), { minWidth: 220, maxWidth: 280 });
+        .bindPopup(() => buildPopup(pois.get(poi.id)), { minWidth: 220, maxWidth: 280 })
+        .on("popupopen", () => setActivePoi(poi.id))
+        .on("popupclose", () => { if (activePoiId === poi.id) setActivePoi(null); });
       markers.set(poi.id, marker);
     }
     syncMarker(poi.id);
+    renderList();
   }
 
   function removePoi(id) {
@@ -273,6 +304,7 @@
     markers.delete(id);
     pois.delete(id);
     renderFilter();
+    renderList();
   }
 
   async function deletePoi(id, button) {
@@ -294,7 +326,7 @@
 
   async function loadData() {
     try {
-      const [categoryList, poiList] = await Promise.all([
+      const [categoryList, poiData] = await Promise.all([
         api("GET", "/api/categories"),
         api("GET", "/api/pois")
       ]);
@@ -303,8 +335,9 @@
         if (!categories.has(id)) hiddenCategories.delete(id);
       }
       renderCategoryOptions();
-      poiList.forEach(upsertPoi);
+      poiData.forEach(upsertPoi);
       renderFilter();
+      renderList();
     } catch (err) {
       toast(`Daten konnten nicht geladen werden: ${err.message}`, true);
     }
@@ -350,6 +383,7 @@
   function applyFilter() {
     storageSet(HIDDEN_KEY, JSON.stringify([...hiddenCategories]));
     for (const id of markers.keys()) syncMarker(id);
+    renderList();
     filterDot.hidden = hiddenCategories.size === 0;
     btnFilter.setAttribute("aria-label", hiddenCategories.size ? "Filter (aktiv)" : "Filter");
   }
@@ -362,7 +396,11 @@
 
   btnFilter.addEventListener("click", () => {
     const open = filterPanel.hidden;
-    if (open) setPicking(false);
+    if (open) {
+      setPicking(false);
+      closeResults();
+      if (isMobile()) setListOpen(false);
+    }
     setFilterOpen(open);
   });
 
@@ -385,6 +423,407 @@
   });
 
   // -------------------------------------------------------------------------
+  // Karte zu einem Ort bewegen
+  // -------------------------------------------------------------------------
+
+  // Bewegt die Karte so, dass latlng gut sichtbar ist: nicht unter der
+  // Seitenleiste und mit Platz für das Popup darüber.
+  function flyToVisible(latlng, zoom, done) {
+    const leftCover = listOpen && !isMobile() ? listPanel.offsetWidth : 0;
+    const centerPoint = map.project(latlng, zoom).subtract(L.point(leftCover / 2, 90));
+    const target = map.unproject(centerPoint, zoom);
+
+    const current = map.project(map.getCenter(), zoom);
+    if (zoom === map.getZoom() && current.distanceTo(centerPoint) < 2) {
+      if (done) done();
+      return;
+    }
+    if (done) map.once("moveend", done);
+    if (map.getCenter().distanceTo(target) > 3000) map.flyTo(target, zoom, { duration: 0.8 });
+    else map.setView(target, zoom, { animate: true });
+  }
+
+  function focusPoi(id) {
+    const poi = pois.get(id);
+    if (!poi) return;
+    // Ausgeblendete Kategorie wieder anzeigen, damit der Ort sichtbar ist.
+    if (hiddenCategories.delete(poi.category)) {
+      applyFilter();
+      renderFilter();
+    }
+    setPicking(false);
+    if (editing) closeForm();
+    if (isMobile()) setListOpen(false);
+    const zoom = Math.max(map.getZoom(), 16);
+    flyToVisible(L.latLng(poi.lat, poi.lng), zoom, () => {
+      const marker = markers.get(id);
+      if (marker && map.hasLayer(marker)) marker.openPopup();
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Liste (Seitenleiste)
+  // -------------------------------------------------------------------------
+
+  function setListOpen(open) {
+    if (open === listOpen) return;
+    listOpen = open;
+    listPanel.classList.toggle("is-open", open);
+    listPanel.inert = !open;
+    document.body.classList.toggle("list-open", open);
+    btnList.setAttribute("aria-expanded", String(open));
+    if (open) {
+      setFilterOpen(false);
+      if (isMobile()) closeSearch();
+      renderList();
+    }
+  }
+
+  btnList.addEventListener("click", () => setListOpen(!listOpen));
+  listClose.addEventListener("click", () => {
+    setListOpen(false);
+    btnList.focus();
+  });
+
+  function renderList() {
+    if (!listOpen) return;
+
+    const all = [...pois.values()];
+    const visible = all
+      .filter((poi) => !hiddenCategories.has(poi.category))
+      .sort((a, b) => a.title.localeCompare(b.title, "de", { sensitivity: "base" }));
+    const hiddenCount = all.length - visible.length;
+
+    listCount.textContent = String(visible.length);
+    listEmpty.hidden = all.length > 0;
+    listHint.hidden = hiddenCount === 0;
+    if (hiddenCount) {
+      listHint.replaceChildren(
+        `${hiddenCount} ${hiddenCount === 1 ? "weiterer Ort ist" : "weitere Orte sind"} durch den Filter ausgeblendet. `,
+        el("button", {
+          type: "button",
+          class: "link-btn",
+          onclick: () => {
+            hiddenCategories.clear();
+            applyFilter();
+            renderFilter();
+          }
+        }, "Alle zeigen")
+      );
+    }
+
+    poiList.replaceChildren(...visible.map((poi) => {
+      const category = categoryOf(poi);
+      return el("li", null,
+        el("button", {
+          type: "button",
+          class: poi.id === activePoiId ? "poi-item is-active" : "poi-item",
+          "data-id": poi.id,
+          style: category ? `--cat:${safeColor(category.color)}` : null,
+          onclick: () => focusPoi(poi.id)
+        },
+          category ? categoryBadgeIcon(category) : null,
+          el("span", { class: "text" },
+            el("span", { class: "title" }, poi.title),
+            category ? el("span", { class: "cat" }, category.name) : null,
+            poi.address ? el("span", { class: "address" }, poi.address) : null
+          )
+        )
+      );
+    }));
+  }
+
+  function setActivePoi(id) {
+    activePoiId = id;
+    for (const item of poiList.querySelectorAll(".poi-item")) {
+      item.classList.toggle("is-active", item.dataset.id === id);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Suche
+  // -------------------------------------------------------------------------
+
+  // Kleinschreibung, ohne Akzente, ß → ss: „Café“ findet auch „cafe“.
+  function normalize(text) {
+    return (text || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/ß/g, "ss");
+  }
+
+  function searchPois(query) {
+    const terms = normalize(query).split(/\s+/).filter(Boolean);
+    if (!terms.length) return [];
+    const hits = [];
+    for (const poi of pois.values()) {
+      const category = categoryOf(poi);
+      const title = normalize(poi.title);
+      const haystack = [title, normalize(poi.address), normalize(poi.description), normalize(category && category.name)].join(" ");
+      if (!terms.every((term) => haystack.includes(term))) continue;
+      const score = title.startsWith(terms[0]) ? 2 : terms.every((term) => title.includes(term)) ? 1 : 0;
+      hits.push({ poi, score });
+    }
+    return hits
+      .sort((a, b) => b.score - a.score || a.poi.title.localeCompare(b.poi.title, "de", { sensitivity: "base" }))
+      .slice(0, 8)
+      .map((hit) => hit.poi);
+  }
+
+  function placeIcon(name) {
+    const span = el("span", { class: "place-icon", "aria-hidden": "true" });
+    span.innerHTML = UI_ICONS[name];
+    return span;
+  }
+
+  function renderSearch({ highlightAddress = false } = {}) {
+    const query = searchInput.value.trim();
+    if (!query) {
+      closeResults();
+      return;
+    }
+
+    const options = [];
+    const addOption = (section, iconNode, title, sub, run, isAction = false) => {
+      const index = options.length;
+      const option = el("div", {
+        class: isAction ? "search-option is-action" : "search-option",
+        role: "option",
+        id: `search-option-${index}`,
+        "aria-selected": "false",
+        // mousedown würde den Fokus vom Suchfeld nehmen
+        onmousedown: (e) => e.preventDefault(),
+        onclick: run
+      },
+        iconNode,
+        el("span", { class: "text" },
+          el("span", { class: "title" }, title),
+          sub ? el("span", { class: "sub" }, sub) : null
+        )
+      );
+      section.append(option);
+      options.push({ node: option, run });
+    };
+    const note = (section, text) => section.append(el("p", { class: "search-note" }, text));
+
+    // Meine Orte
+    const poiSection = el("div", { class: "search-section", role: "group", "aria-label": "Meine Orte" },
+      el("h3", null, "Meine Orte"));
+    const matches = searchPois(query);
+    for (const poi of matches) {
+      const category = categoryOf(poi);
+      addOption(poiSection,
+        category ? categoryBadgeIcon(category) : placeIcon("place"),
+        poi.title,
+        [category && category.name, poi.address].filter(Boolean).join(" · "),
+        () => selectPoi(poi.id));
+    }
+    if (!matches.length) note(poiSection, "Keine passenden Orte.");
+
+    // Adressen (OpenStreetMap)
+    const addressSection = el("div", { class: "search-section", role: "group", "aria-label": "Adressen" },
+      el("h3", null, "Adressen"));
+    const firstAddressIndex = options.length;
+    const state = addressSearch.query === query ? addressSearch.status : "idle";
+    if (state === "done") {
+      for (const result of addressSearch.results) {
+        addOption(addressSection, placeIcon("place"), result.label, result.address, () => selectAddress(result));
+      }
+      if (!addressSearch.results.length) note(addressSection, `Keine Adressen in ${city.name} gefunden.`);
+    } else if (state === "loading") {
+      note(addressSection, "Suche läuft …");
+    } else if (state === "error") {
+      note(addressSection, addressSearch.error);
+      addOption(addressSection, placeIcon("search"), "Erneut versuchen", null, () => runAddressSearch(query), true);
+    } else if (query.length >= 2) {
+      addOption(addressSection, placeIcon("search"), `Adressen suchen: „${query}“`,
+        isMobile() ? "Antippen oder Suchen drücken" : "Enter drücken", () => runAddressSearch(query), true);
+    } else {
+      note(addressSection, "Für Adressen mindestens zwei Zeichen eingeben.");
+    }
+
+    searchResults.replaceChildren(poiSection, addressSection);
+    searchOptions = options;
+    searchResults.hidden = false;
+    searchInput.setAttribute("aria-expanded", "true");
+
+    if (highlightAddress && state === "done" && addressSearch.results.length) setActiveOption(firstAddressIndex);
+    else setActiveOption(-1);
+  }
+
+  function setActiveOption(index) {
+    activeOption = index;
+    searchOptions.forEach((option, i) => {
+      option.node.classList.toggle("is-active", i === index);
+      option.node.setAttribute("aria-selected", String(i === index));
+    });
+    if (index >= 0) {
+      searchInput.setAttribute("aria-activedescendant", searchOptions[index].node.id);
+      searchOptions[index].node.scrollIntoView({ block: "nearest" });
+    } else {
+      searchInput.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function closeResults() {
+    searchResults.hidden = true;
+    searchInput.setAttribute("aria-expanded", "false");
+    searchOptions = [];
+    setActiveOption(-1);
+  }
+
+  async function runAddressSearch(query) {
+    if (query.length < 2) return;
+    addressSearch = { query, status: "loading", results: [], error: "" };
+    renderSearch();
+    try {
+      const results = await api("GET", `/api/geocode/search?q=${encodeURIComponent(query)}`);
+      if (addressSearch.query !== query) return;
+      addressSearch = { query, status: "done", results, error: "" };
+    } catch (err) {
+      if (addressSearch.query !== query) return;
+      addressSearch = { query, status: "error", results: [], error: err.message };
+    }
+    if (searchInput.value.trim() === query && document.activeElement === searchInput) {
+      renderSearch({ highlightAddress: true });
+    }
+  }
+
+  // Suche nach einer Auswahl schließen (auf dem Smartphone ganz).
+  function finishSearch() {
+    closeResults();
+    searchInput.blur();
+    if (isMobile()) closeSearch();
+  }
+
+  function selectPoi(id) {
+    finishSearch();
+    focusPoi(id);
+  }
+
+  function selectAddress(result) {
+    finishSearch();
+    setPicking(false);
+    if (editing) closeForm();
+    showSearchMarker(result);
+    flyToVisible(L.latLng(result.lat, result.lng), 17, () => {
+      if (searchMarker) searchMarker.openPopup();
+    });
+  }
+
+  const searchPinIcon = L.divIcon({
+    className: "search-pin",
+    html: "<span></span>",
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+    popupAnchor: [0, -12]
+  });
+
+  function showSearchMarker(result) {
+    clearSearchMarker();
+    searchMarker = L.marker([result.lat, result.lng], { icon: searchPinIcon, title: result.label, zIndexOffset: 500 })
+      .bindPopup(() => buildAddressPopup(result), { minWidth: 200, maxWidth: 280 })
+      .addTo(map);
+  }
+
+  function clearSearchMarker() {
+    if (!searchMarker) return;
+    searchMarker.remove();
+    searchMarker = null;
+  }
+
+  function buildAddressPopup(result) {
+    return el("div", { class: "poi-popup" },
+      el("span", { class: "cat-badge", style: "--cat:#1f2328" }, placeIcon("search"), "Suchergebnis"),
+      el("h3", null, result.label),
+      result.address ? el("p", { class: "meta" }, uiIcon("place"), el("span", null, result.address)) : null,
+      el("div", { class: "actions" },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onclick: later(() => {
+            if (categories.size === 0) return;
+            clearSearchMarker();
+            openForm(null, L.latLng(result.lat, result.lng), {
+              title: result.address ? result.label : "",
+              address: result.address || result.label
+            });
+          })
+        }, "Als POI anlegen"),
+        el("button", { type: "button", class: "btn btn-sm", onclick: later(clearSearchMarker) }, "Entfernen")
+      )
+    );
+  }
+
+  function openSearch() {
+    document.body.classList.add("search-open");
+    setFilterOpen(false);
+    if (isMobile()) setListOpen(false);
+    searchInput.focus();
+    if (searchInput.value.trim()) renderSearch();
+  }
+
+  function closeSearch() {
+    document.body.classList.remove("search-open");
+    closeResults();
+  }
+
+  btnSearch.addEventListener("click", openSearch);
+  searchClose.addEventListener("click", () => {
+    closeSearch();
+    btnSearch.focus();
+  });
+
+  searchInput.addEventListener("input", () => renderSearch());
+  searchInput.addEventListener("focus", () => {
+    setFilterOpen(false);
+    if (searchInput.value.trim()) renderSearch();
+  });
+
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (searchResults.hidden) renderSearch();
+      if (!searchOptions.length) return;
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      const next = activeOption < 0
+        ? (step > 0 ? 0 : searchOptions.length - 1)
+        : (activeOption + step + searchOptions.length) % searchOptions.length;
+      setActiveOption(next);
+    } else if (e.key === "Enter" && activeOption >= 0 && !searchResults.hidden) {
+      e.preventDefault();
+      searchOptions[activeOption].run();
+    } else if (e.key === "Escape") {
+      // Eigenes Escape-Verhalten, nicht das globale
+      e.preventDefault();
+      e.stopPropagation();
+      if (!searchResults.hidden) closeResults();
+      else if (isMobile()) closeSearch();
+      else searchInput.blur();
+    }
+  });
+
+  // Enter (bzw. „Suchen“ auf der Handytastatur) startet die Adresssuche.
+  searchForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const query = searchInput.value.trim();
+    if (query.length >= 2) runAddressSearch(query);
+  });
+
+  // Klick außerhalb schließt die Ergebnisse.
+  document.addEventListener("click", (e) => {
+    if (searchForm.contains(e.target) || btnSearch.contains(e.target)) return;
+    if (isMobile() && document.body.classList.contains("search-open")) closeSearch();
+    else closeResults();
+  });
+
+  // Beim Wechsel zwischen Handy- und Desktop-Layout aufräumen.
+  mobileQuery.addEventListener("change", () => {
+    closeSearch();
+  });
+
+  // -------------------------------------------------------------------------
   // Ort auswählen
   // -------------------------------------------------------------------------
 
@@ -394,6 +833,7 @@
     pickHint.hidden = !on;
     btnNew.setAttribute("aria-pressed", String(on));
     btnNewLabel.textContent = on ? "Abbrechen" : "Neuer POI";
+    btnNew.setAttribute("aria-label", on ? "Auswahl abbrechen" : "Neuer POI");
   }
 
   btnNew.addEventListener("click", () => {
@@ -406,6 +846,8 @@
       return;
     }
     setFilterOpen(false);
+    closeSearch();
+    if (isMobile()) setListOpen(false);
     closeForm();
     map.closePopup();
     setPicking(true);
@@ -423,9 +865,12 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (!filterPanel.hidden) setFilterOpen(false);
+    if (!searchResults.hidden) closeResults();
+    else if (document.body.classList.contains("search-open")) closeSearch();
+    else if (!filterPanel.hidden) setFilterOpen(false);
     else if (picking) setPicking(false);
     else if (editing) closeForm();
+    else if (listOpen) setListOpen(false);
   });
 
   // -------------------------------------------------------------------------
@@ -460,7 +905,8 @@
     if (editing) editing.draft.setIcon(pinIcon(selectedCategory(), true));
   });
 
-  function openForm(poi, latlng) {
+  // preset (optional): { title, address } zum Vorausfüllen, z. B. aus der Suche
+  function openForm(poi, latlng, preset) {
     closeForm();
     map.closePopup();
 
@@ -481,20 +927,20 @@
     const f = form.elements;
     form.reset();
     selectCategory(category ? category.id : null);
-    f.title.value = poi ? poi.title : "";
+    f.title.value = poi ? poi.title : (preset && preset.title) || "";
     f.description.value = poi ? poi.description : "";
-    f.address.value = poi ? poi.address : "";
+    f.address.value = poi ? poi.address : (preset && preset.address) || "";
     f.author.value = poi ? poi.author : storageGet(AUTHOR_KEY) || "";
     f.address.placeholder = ADDRESS_PLACEHOLDER;
     for (const node of form.querySelectorAll("[aria-invalid]")) node.removeAttribute("aria-invalid");
     panelTitle.textContent = id ? "POI bearbeiten" : "Neuer POI";
     addressHint.textContent = "";
     formError.hidden = true;
-    addressTouched = false;
+    addressTouched = Boolean(preset && preset.address);
     panel.hidden = false;
     panel.scrollTop = 0;
 
-    if (!id) lookupAddress(latlng);
+    if (!id && !addressTouched) lookupAddress(latlng);
     keepVisible(latlng);
     if (window.matchMedia("(pointer: fine)").matches) f.title.focus();
   }
