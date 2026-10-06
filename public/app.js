@@ -258,7 +258,7 @@
       el("p", null, "Diesen POI wirklich löschen?"),
       el("div", { class: "actions" }, btnConfirm, btnCancel)
     );
-    root.append(actions, confirmBox);
+    root.append(routeButton({ lat: poi.lat, lng: poi.lng, label: poi.title }), actions, confirmBox);
 
     function showConfirm(show) {
       actions.hidden = show;
@@ -738,6 +738,7 @@
       el("span", { class: "cat-badge", style: "--cat:#1f2328" }, placeIcon("search"), "Suchergebnis"),
       el("h3", null, result.label),
       result.address ? el("p", { class: "meta" }, uiIcon("place"), el("span", null, result.address)) : null,
+      routeButton({ lat: result.lat, lng: result.lng, label: result.label }),
       el("div", { class: "actions" },
         el("button", {
           type: "button",
@@ -824,6 +825,193 @@
   });
 
   // -------------------------------------------------------------------------
+  // Routenplanung (Start: eigener Standort, Routing über den Server/OSRM)
+  // -------------------------------------------------------------------------
+
+  const MODES = {
+    foot: { label: "Zu Fuß", color: "#2563eb" },
+    bike: { label: "Fahrrad", color: "#0f8a80" },
+    car: { label: "Auto", color: "#7c4dcc" }
+  };
+  const MODE_KEY = "stadtapp.routeMode";
+
+  const routePanel = $("route-panel");
+  const routeTitle = $("route-title");
+  const routeSummary = $("route-summary");
+  const routeClose = $("route-close");
+  const modeButtons = routePanel.querySelectorAll(".mode-btn");
+
+  const routeLayer = L.layerGroup().addTo(map);
+  let route = null; // { to: {lat, lng, label}, mode, from: LatLng|null, data }
+  let routeToken = 0; // verwirft veraltete Antworten
+
+  const ROUTE_ICON =
+    '<svg class="route-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18" r="2.5"/>' +
+    '<circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/></svg>';
+
+  function routeButton(target) {
+    return el("button", {
+      type: "button",
+      class: "btn btn-sm btn-primary route-btn",
+      onclick: later(() => startRoute(target))
+    }, fromHtml(ROUTE_ICON), "Route hierher");
+  }
+
+  function formatDistance(meters) {
+    if (meters < 1000) return `${Math.max(10, Math.round(meters / 10) * 10)} m`;
+    const km = meters / 1000;
+    return `${km.toLocaleString("de-DE", { maximumFractionDigits: km < 10 ? 1 : 0 })} km`;
+  }
+
+  function formatDuration(seconds) {
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    if (minutes < 60) return `${minutes} min`;
+    return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+  }
+
+  function setRouteSummary(...content) {
+    routeSummary.classList.remove("is-error");
+    routeSummary.replaceChildren(...content);
+  }
+
+  function routeError(message) {
+    routeLayer.clearLayers();
+    routeSummary.classList.add("is-error");
+    routeSummary.replaceChildren(
+      el("span", null, message),
+      el("button", { type: "button", class: "link-btn", onclick: () => locateAndRoute() }, "Erneut versuchen")
+    );
+  }
+
+  function updateModeButtons() {
+    for (const button of modeButtons) {
+      button.setAttribute("aria-pressed", String(button.dataset.mode === route.mode));
+    }
+  }
+
+  function startRoute(target) {
+    map.closePopup();
+    setPicking(false);
+    if (editing) closeForm();
+    if (isMobile()) setListOpen(false);
+
+    const savedMode = storageGet(MODE_KEY);
+    route = {
+      to: target,
+      mode: route ? route.mode : (MODES[savedMode] ? savedMode : "foot"),
+      from: null,
+      data: null
+    };
+    routeTitle.textContent = target.label;
+    routeTitle.title = target.label;
+    updateModeButtons();
+    routeLayer.clearLayers();
+    routePanel.hidden = false;
+    document.body.classList.add("route-open");
+    locateAndRoute();
+  }
+
+  function geolocationMessage(error) {
+    if (error.code === error.PERMISSION_DENIED) {
+      return "Du hast den Zugriff auf deinen Standort nicht erlaubt. Ohne Standort kann keine Route " +
+        "berechnet werden. Du kannst den Zugriff in den Website-Einstellungen deines Browsers erlauben.";
+    }
+    if (error.code === error.TIMEOUT) {
+      return "Die Standortbestimmung hat zu lange gedauert.";
+    }
+    return "Dein Standort konnte nicht bestimmt werden. Sind die Ortungsdienste eingeschaltet?";
+  }
+
+  function locateAndRoute() {
+    if (!route) return;
+    const token = ++routeToken;
+    if (!("geolocation" in navigator)) {
+      routeError("Dein Browser kann deinen Standort nicht bestimmen.");
+      return;
+    }
+    if (!window.isSecureContext) {
+      routeError("Der Standort ist nur über eine sichere Verbindung (https) verfügbar.");
+      return;
+    }
+    setRouteSummary(el("span", { class: "muted" }, "Standort wird ermittelt …"));
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        if (token !== routeToken || !route) return;
+        route.from = L.latLng(position.coords.latitude, position.coords.longitude);
+        calculateRoute();
+      },
+      (error) => {
+        if (token !== routeToken || !route) return;
+        routeError(geolocationMessage(error));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    );
+  }
+
+  async function calculateRoute() {
+    const token = ++routeToken;
+    const { from, to, mode } = route;
+    setRouteSummary(el("span", { class: "muted" }, "Route wird berechnet …"));
+    try {
+      const data = await api("GET",
+        `/api/route?profile=${mode}&from=${from.lat},${from.lng}&to=${to.lat},${to.lng}`);
+      if (token !== routeToken || !route) return;
+      route.data = data;
+      drawRoute();
+      setRouteSummary(el("div", { class: "figures" },
+        el("strong", null, formatDistance(data.distance)),
+        el("span", null, `ca. ${formatDuration(data.duration)} ${MODES[mode].label.toLowerCase()}`)
+      ));
+    } catch (err) {
+      if (token !== routeToken || !route) return;
+      routeError(err.message);
+    }
+  }
+
+  function drawRoute() {
+    routeLayer.clearLayers();
+    const { data, mode, from, to } = route;
+    const line = data.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+    L.polyline(line, { color: "#fff", weight: 9, opacity: 0.9, interactive: false }).addTo(routeLayer);
+    L.polyline(line, { color: MODES[mode].color, weight: 5, opacity: 0.95, interactive: false }).addTo(routeLayer);
+    L.marker(from, {
+      icon: L.divIcon({ className: "my-location", html: "<span></span>", iconSize: [18, 18], iconAnchor: [9, 9] }),
+      title: "Dein Standort",
+      keyboard: false
+    }).bindTooltip("Dein Standort").addTo(routeLayer);
+
+    // Ganze Route zeigen, ohne dass Liste oder Routen-Karte sie verdecken
+    const bounds = L.latLngBounds(line).extend(from).extend([to.lat, to.lng]);
+    const leftCover = listOpen && !isMobile() ? listPanel.offsetWidth : 0;
+    map.fitBounds(bounds, {
+      paddingTopLeft: [leftCover + 40, 40],
+      paddingBottomRight: [40, routePanel.offsetHeight + 50],
+      maxZoom: 17
+    });
+  }
+
+  function closeRoute() {
+    routeToken++;
+    route = null;
+    routeLayer.clearLayers();
+    routePanel.hidden = true;
+    document.body.classList.remove("route-open");
+  }
+
+  for (const button of modeButtons) {
+    button.addEventListener("click", () => {
+      if (!route || route.mode === button.dataset.mode) return;
+      route.mode = button.dataset.mode;
+      storageSet(MODE_KEY, route.mode);
+      updateModeButtons();
+      if (route.from) calculateRoute();
+      else locateAndRoute();
+    });
+  }
+
+  routeClose.addEventListener("click", closeRoute);
+
+  // -------------------------------------------------------------------------
   // Ort auswählen
   // -------------------------------------------------------------------------
 
@@ -871,6 +1059,7 @@
     else if (picking) setPicking(false);
     else if (editing) closeForm();
     else if (listOpen) setListOpen(false);
+    else if (route) closeRoute();
   });
 
   // -------------------------------------------------------------------------
@@ -939,6 +1128,7 @@
     addressTouched = Boolean(preset && preset.address);
     panel.hidden = false;
     panel.scrollTop = 0;
+    document.body.classList.add("form-open");
 
     if (!id && !addressTouched) lookupAddress(latlng);
     keepVisible(latlng);
@@ -953,6 +1143,7 @@
     editing = null;
     if (id) syncMarker(id);
     panel.hidden = true;
+    document.body.classList.remove("form-open");
   }
 
   function moveDraft(latlng) {

@@ -4,6 +4,7 @@ const express = require("express");
 const store = require("./store");
 const { reverseGeocode, searchPlaces } = require("./geocode");
 const categories = require("./categories");
+const { getRoute, RoutingError } = require("./routing");
 
 const app = express();
 app.set("view engine", "ejs");
@@ -152,6 +153,31 @@ app.get("/api/geocode/search", async (req, res) => {
   } catch (err) {
     console.warn("Nominatim-Suche fehlgeschlagen:", err.message);
     res.status(502).json({ error: "Die Adresssuche ist gerade nicht erreichbar." });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Routenplanung (OSRM, routing.openstreetmap.de)
+// ---------------------------------------------------------------------------
+
+function parseLatLng(value) {
+  const parts = typeof value === "string" ? value.split(",").map(Number) : [];
+  if (parts.length !== 2 || !parts.every(Number.isFinite)) return null;
+  const [lat, lng] = parts;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+
+app.get("/api/route", async (req, res) => {
+  const from = parseLatLng(req.query.from);
+  const to = parseLatLng(req.query.to);
+  if (!from || !to) return res.status(400).json({ error: "Start oder Ziel ist ungültig." });
+  try {
+    res.json(await getRoute(String(req.query.profile || ""), from, to));
+  } catch (err) {
+    if (err instanceof RoutingError) return res.status(err.status).json({ error: err.message });
+    console.warn("Routenberechnung fehlgeschlagen:", err.message);
+    res.status(502).json({ error: "Die Route konnte gerade nicht berechnet werden. Bitte versuche es gleich noch einmal." });
   }
 });
 
