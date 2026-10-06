@@ -184,10 +184,10 @@ body {
 #btn-filter[aria-expanded="true"] { background: var(--surface); border-color: var(--text); }
 .filter-dot {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 9px;
-  height: 9px;
+  top: -2px;
+  right: -2px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
   background: var(--accent);
   border: 2px solid var(--bg);

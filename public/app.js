@@ -545,6 +545,13 @@
     form.elements[name].addEventListener("input", (e) => e.target.removeAttribute("aria-invalid"));
   }
 
+  // Sobald alle Pflichtangaben vorhanden sind, verschwindet die Fehlermeldung.
+  for (const type of ["input", "change"]) {
+    form.addEventListener(type, () => {
+      if (!formError.hidden && !form.querySelector('[aria-invalid="true"]')) formError.hidden = true;
+    });
+  }
+
   for (const button of panel.querySelectorAll('[data-action="close"]')) {
     button.addEventListener("click", closeForm);
   }
