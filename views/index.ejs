@@ -1,7 +1,130 @@
 <!doctype html>
-<html>
-<head><title><%= title %></title></head>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <title><%= title %></title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 24'%3E%3Cg fill='none' stroke='%23d1392b' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M16 3 30.7 13.3M16 3 21.9 20M16 3V21M16 3 10.1 20M16 3 1.3 13.3'/%3E%3Cpath d='M30.7 13.3A18 18 0 0 1 1.3 13.3'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <style>
+    :root {
+      --nav-height: 56px;
+      --accent: #d1392b;
+      --text: #1f2328;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --border: rgba(0, 0, 0, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+    }
+
+    .navbar {
+      flex: 0 0 auto;
+      height: calc(var(--nav-height) + env(safe-area-inset-top));
+      padding: env(safe-area-inset-top) max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 1px 8px rgba(0, 0, 0, 0.04);
+      position: relative;
+      z-index: 1000;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: inherit;
+    }
+
+    .brand svg {
+      width: 32px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .brand-name {
+      font-size: 1.15rem;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+    }
+
+    .brand-sub {
+      font-size: 0.8rem;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    #map {
+      flex: 1 1 auto;
+      min-height: 0;
+      width: 100%;
+    }
+
+    /* Größere Bedienelemente für Touch-Geräte */
+    .leaflet-touch .leaflet-bar a {
+      width: 40px;
+      height: 40px;
+      line-height: 40px;
+    }
+
+    .leaflet-bottom {
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+  </style>
+</head>
 <body>
-  <h1><%= message %></h1>
+  <header class="navbar">
+    <a class="brand" href="/" aria-label="StadtApp <%= city.name %> – Startseite">
+      <!-- Fächer-Logo: Karlsruhes Straßen laufen fächerförmig vom Schloss aus -->
+      <svg viewBox="0 0 32 24" aria-hidden="true">
+        <g fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round">
+          <path d="M16 3 30.7 13.3M16 3 26.8 17.4M16 3 21.9 20M16 3V21M16 3 10.1 20M16 3 5.2 17.4M16 3 1.3 13.3"/>
+          <path d="M30.7 13.3A18 18 0 0 1 1.3 13.3"/>
+        </g>
+        <circle cx="16" cy="3" r="2.6" fill="var(--accent)"/>
+      </svg>
+      <span class="brand-name"><%= city.name %></span>
+      <span class="brand-sub">StadtApp</span>
+    </a>
+  </header>
+
+  <main id="map" aria-label="Karte von <%= city.name %>"></main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+    const city = <%- JSON.stringify(city).replace(/</g, "\\u003c") %>;
+
+    const map = L.map("map", {
+      center: city.center,
+      zoom: city.zoom,
+      zoomControl: true
+    });
+
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-Mitwirkende'
+    }).addTo(map);
+
+    L.control.scale({ imperial: false }).addTo(map);
+  </script>
 </body>
 </html>
