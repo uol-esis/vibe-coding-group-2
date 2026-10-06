@@ -829,9 +829,9 @@
   // -------------------------------------------------------------------------
 
   const MODES = {
-    foot: { label: "Zu Fuß", color: "#2563eb" },
-    bike: { label: "Fahrrad", color: "#0f8a80" },
-    car: { label: "Auto", color: "#7c4dcc" }
+    foot: { label: "Zu Fuß", phrase: "zu Fuß", color: "#2563eb" },
+    bike: { label: "Fahrrad", phrase: "mit dem Fahrrad", color: "#0f8a80" },
+    car: { label: "Auto", phrase: "mit dem Auto", color: "#7c4dcc" }
   };
   const MODE_KEY = "stadtapp.routeMode";
 
@@ -960,7 +960,7 @@
       drawRoute();
       setRouteSummary(el("div", { class: "figures" },
         el("strong", null, formatDistance(data.distance)),
-        el("span", null, `ca. ${formatDuration(data.duration)} ${MODES[mode].label.toLowerCase()}`)
+        el("span", null, `ca. ${formatDuration(data.duration)} ${MODES[mode].phrase}`)
       ));
     } catch (err) {
       if (token !== routeToken || !route) return;
