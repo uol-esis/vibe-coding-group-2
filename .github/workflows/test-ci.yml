@@ -1,0 +1,59 @@
+name: Test (temporary)
+on:
+  push:
+    branches: [test-ci2]
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start with old data (migration)
+        run: |
+          set -eux
+          docker compose up -d --build && sleep 4
+          docker compose exec -T app sh -c 'cat > /app/data/db.json' <<'JSON'
+          {"pois":[{"id":"old1","title":"Café Bleu","description":"","address":"Kaiserstraße 1","author":"Alt","lat":49.0095,"lng":8.403,"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z"},{"id":"old2","title":"Irgendwas","description":"","address":"","author":"Alt","lat":49.012,"lng":8.41,"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z"}]}
+          JSON
+          docker compose restart && sleep 4 && docker compose logs
+      - name: API tests
+        run: |
+          set -eux
+          mkdir -p shots
+          B=http://localhost:3000
+          curl -sf $B/api/categories | jq -e 'length==9'
+          curl -sf $B/api/pois | jq -e '[.[]|.category]==["cafe","sonstiges"]'
+          docker compose exec -T app ls /app/data | grep -q backup
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"title":"a","author":"b","lat":49,"lng":8}' $B/api/pois)" = 400
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"title":"a","author":"b","lat":49,"lng":8,"category":"xyz"}' $B/api/pois)" = 400
+          curl -sf "$B/api/geocode/search?q=Schloss" | jq -e "length>0"
+          test "$(curl -s -o /dev/null -w "%{http_code}" "$B/api/geocode/search?q=a")" = 400
+          for p in foot bike car; do curl -sf "$B/api/route?profile=$p&from=48.9935,8.4012&to=49.0134,8.4044" | jq -c "{profile,distance,duration}" | tee -a shots/routes.txt; done
+          test "$(curl -s -o /dev/null -w "%{http_code}" "$B/api/route?profile=foot&from=52.52,13.40&to=49.0134,8.4044")" = 422
+          echo "API OK" > shots/api.txt
+      - name: Browser tests
+        run: |
+          set -eux
+          mkdir -p /tmp/e2e && cp test/e2e.js /tmp/e2e/ && cd /tmp/e2e
+          npm init -y >/dev/null && npm i puppeteer-core --silent
+          OUT=$GITHUB_WORKSPACE/shots node e2e.js
+      - name: Persistence after restart
+        run: |
+          set -eux
+          docker compose down && docker compose up -d && sleep 4
+          curl -sf http://localhost:3000/api/pois | tee shots/pois-after-restart.json | jq -e 'length==2'
+      - name: Publish results
+        if: always()
+        run: |
+          docker compose logs > shots/server.log 2>&1 || true
+          cd shots
+          git init -q && git checkout -q -b ci-results
+          git config user.name ci && git config user.email ci@users.noreply.github.com
+          git add . && git commit -qm "results ${{ github.run_id }}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" ci-results
+      - name: Clean up test branches
+        if: always()
+        run: |
+          sleep 120
+          git push origin --delete ci-results test-ci2 test-ci || true
