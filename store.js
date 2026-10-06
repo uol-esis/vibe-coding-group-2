@@ -15,13 +15,16 @@ const DB_FILE = path.join(DATA_DIR, "db.json");
 // Grundstruktur der Datei. Neue Datenarten der App bekommen hier einfach
 // einen weiteren Schlüssel; fehlende Schlüssel werden beim Laden ergänzt.
 const DEFAULTS = {
+  categories: [],
   pois: []
 };
 
 let data = null;
 let writeQueue = Promise.resolve();
 
-async function load() {
+// migrate(db) kann die geladenen Daten auf den aktuellen Stand bringen
+// (z. B. neue Felder ergänzen); danach wird die Datei gespeichert.
+async function load({ migrate } = {}) {
   await fs.mkdir(DATA_DIR, { recursive: true });
   let stored = {};
   try {
@@ -33,8 +36,15 @@ async function load() {
     }
   }
   data = { ...structuredClone(DEFAULTS), ...stored };
+  if (migrate && migrate(data) && Object.keys(stored).length > 0) {
+    // Vor einer Datenmigration eine Sicherungskopie der alten Datei anlegen.
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    await fs.copyFile(DB_FILE, path.join(DATA_DIR, `db.backup-${stamp}.json`));
+  }
   await persist();
-  console.log(`Daten geladen aus ${DB_FILE} (${data.pois.length} POIs)`);
+  console.log(
+    `Daten geladen aus ${DB_FILE} (${data.pois.length} POIs, ${data.categories.length} Kategorien)`
+  );
 }
 
 async function persist() {

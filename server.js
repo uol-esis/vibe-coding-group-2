@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const express = require("express");
 const store = require("./store");
 const { reverseGeocode } = require("./geocode");
+const categories = require("./categories");
 
 const app = express();
 app.set("view engine", "ejs");
@@ -68,8 +69,18 @@ function validatePoi(body) {
   value.lat = lat;
   value.lng = lng;
 
+  const category = typeof input.category === "string" ? input.category : "";
+  if (!store.get().categories.some((c) => c.id === category)) {
+    errors.push("Bitte wähle eine Kategorie.");
+  }
+  value.category = category;
+
   return { errors, value };
 }
+
+app.get("/api/categories", (req, res) => {
+  res.json(store.get().categories);
+});
 
 app.get("/api/pois", (req, res) => {
   res.json(store.get().pois);
@@ -147,7 +158,7 @@ app.use((err, req, res, next) => {
 });
 
 store
-  .load()
+  .load({ migrate: categories.migrate })
   .then(() => {
     app.listen(3000, "0.0.0.0", () => {
       console.log(`Server läuft auf Port 3000`);

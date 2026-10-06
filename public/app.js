@@ -23,20 +23,30 @@
   const $ = (id) => document.getElementById(id);
   const btnNew = $("btn-new-poi");
   const btnNewLabel = btnNew.querySelector(".btn-label");
+  const btnFilter = $("btn-filter");
+  const filterDot = $("filter-dot");
+  const filterPanel = $("filter-panel");
+  const filterList = $("filter-list");
   const pickHint = $("pick-hint");
   const panel = $("poi-panel");
   const form = $("poi-form");
   const panelTitle = $("poi-panel-title");
+  const categoryField = $("category-field");
+  const categoryOptions = $("category-options");
   const formError = $("form-error");
   const addressHint = $("address-hint");
   const btnSave = $("btn-save");
   const toastEl = $("toast");
 
   const AUTHOR_KEY = "stadtapp.author";
+  const HIDDEN_KEY = "stadtapp.hiddenCategories";
   const ADDRESS_PLACEHOLDER = "Straße Hausnummer, PLZ Ort";
+  const FALLBACK_CATEGORY = "sonstiges";
 
+  const categories = new Map(); // id → Kategorie (Reihenfolge wie vom Server)
   const pois = new Map(); // id → POI
   const markers = new Map(); // id → Leaflet-Marker
+  const hiddenCategories = new Set(readJson(HIDDEN_KEY, []));
 
   let picking = false; // wartet auf Klick in die Karte
   let editing = null; // { id: string|null, draft: Marker } während das Formular offen ist
@@ -44,37 +54,71 @@
   let geocodeToken = 0; // verwirft veraltete Adressantworten
 
   // -------------------------------------------------------------------------
-  // Hilfsfunktionen
+  // Icons
   // -------------------------------------------------------------------------
 
-  const PIN_SVG =
-    '<svg viewBox="0 0 30 40" aria-hidden="true">' +
-    '<path d="M15 1.5C7.5 1.5 1.5 7.4 1.5 14.8c0 9.6 11.6 22 12.4 22.9a1.5 1.5 0 0 0 2.2 0' +
-    'c.8-.9 12.4-13.3 12.4-22.9C28.5 7.4 22.5 1.5 15 1.5z"/>' +
-    '<circle cx="15" cy="14.5" r="5"/></svg>';
+  // Icons für Kategorien (24×24, Strichzeichnung). Der Name steht in der
+  // Kategorie unter "icon".
+  const CATEGORY_ICONS = {
+    landmark: '<path d="M3 21h18M5 21v-9M9.7 21v-9M14.3 21v-9M19 21v-9M3 9.5 12 4l9 5.5z"/>',
+    tree: '<path d="M12 21v-4M12 3 6.5 11H9l-3.5 6h13L15 11h2.5z"/>',
+    utensils: '<path d="M7 3v18M4.5 3v5a2.5 2.5 0 0 0 5 0V3M17 21V3c-2.2 1.3-3.5 4-3.5 7.5V14H17"/>',
+    cup: '<path d="M4 9h12v4.5a5.5 5.5 0 0 1-5.5 5.5h-1A5.5 5.5 0 0 1 4 13.5zM16 10.5h1.5a2.5 2.5 0 0 1 0 5H16M8 3.5V6M12 3.5V6"/>',
+    music: '<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
+    graduation: '<path d="M2 9.5 12 5l10 4.5-10 4.5zM6 11.5V16c0 1.5 2.7 3 6 3s6-1.5 6-3v-4.5M22 9.5V15"/>',
+    bag: '<path d="M5 8h14l-1.2 13H6.2zM9 10V6.5a3 3 0 0 1 6 0V10"/>',
+    ball: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18M5.6 5.6c3 3 3 9.8 0 12.8M18.4 5.6c-3 3-3 9.8 0 12.8"/>',
+    star: '<path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8z"/>'
+  };
 
-  function pinIcon(draft) {
-    return L.divIcon({
-      className: draft ? "poi-pin is-draft" : "poi-pin",
-      html: PIN_SVG,
-      iconSize: [30, 40],
-      iconAnchor: [15, 38],
-      popupAnchor: [0, -36]
-    });
-  }
-
-  const ICONS = {
+  const UI_ICONS = {
     place: '<svg viewBox="0 0 24 24"><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>',
     user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>'
   };
+
+  const PIN_PATH =
+    "M15 1.5C7.5 1.5 1.5 7.4 1.5 14.8c0 9.6 11.6 22 12.4 22.9a1.5 1.5 0 0 0 2.2 0" +
+    "c.8-.9 12.4-13.3 12.4-22.9C28.5 7.4 22.5 1.5 15 1.5z";
+
+  function safeColor(color) {
+    return /^#[0-9a-f]{3,8}$/i.test(color || "") ? color : "#64748b";
+  }
+
+  function categoryIconMarkup(category) {
+    return CATEGORY_ICONS[category && category.icon] || CATEGORY_ICONS.star;
+  }
+
+  const pinCache = new Map();
+  function pinIcon(category, draft) {
+    const key = `${category ? category.id : "-"}|${draft}`;
+    if (!pinCache.has(key)) {
+      const color = category ? safeColor(category.color) : "#1f2328";
+      const inner = category
+        ? `<svg class="pin-icon" x="7" y="6.5" width="16" height="16" viewBox="0 0 24 24">${categoryIconMarkup(category)}</svg>`
+        : '<circle class="pin-dot" cx="15" cy="14.5" r="5"/>';
+      pinCache.set(key, L.divIcon({
+        className: draft ? "poi-pin is-draft" : "poi-pin",
+        html: `<svg viewBox="0 0 30 40" aria-hidden="true"><path class="pin-body" style="fill:${color}" d="${PIN_PATH}"/>${inner}</svg>`,
+        iconSize: [30, 40],
+        iconAnchor: [15, 38],
+        popupAnchor: [0, -36]
+      }));
+    }
+    return pinCache.get(key);
+  }
+
+  // -------------------------------------------------------------------------
+  // Hilfsfunktionen
+  // -------------------------------------------------------------------------
 
   // Baut DOM-Elemente; Texte werden immer als Text (nie als HTML) eingesetzt.
   function el(tag, attrs, ...children) {
     const node = document.createElement(tag);
     for (const [key, value] of Object.entries(attrs || {})) {
+      if (value == null || value === false) continue;
       if (key === "class") node.className = value;
       else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-      else node.setAttribute(key, value);
+      else node.setAttribute(key, value === true ? "" : value);
     }
     for (const child of children) {
       if (child != null && child !== false) node.append(child);
@@ -82,10 +126,34 @@
     return node;
   }
 
-  function icon(name) {
-    const span = document.createElement("span");
-    span.innerHTML = ICONS[name];
-    return span.firstChild;
+  function fromHtml(html) {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    return template.content.firstElementChild;
+  }
+
+  function uiIcon(name) {
+    return fromHtml(UI_ICONS[name]);
+  }
+
+  // Rundes, farbiges Kategorie-Icon
+  function categoryBadgeIcon(category) {
+    const span = el("span", { class: "cat-icon", style: `--cat:${safeColor(category.color)}`, "aria-hidden": "true" });
+    span.innerHTML = `<svg viewBox="0 0 24 24">${categoryIconMarkup(category)}</svg>`;
+    return span;
+  }
+
+  function categoryOf(poi) {
+    return categories.get(poi.category) || categories.get(FALLBACK_CATEGORY) || null;
+  }
+
+  function readJson(key, fallback) {
+    try {
+      const value = JSON.parse(localStorage.getItem(key));
+      return value == null ? fallback : value;
+    } catch {
+      return fallback;
+    }
   }
 
   function storageGet(key) {
@@ -134,10 +202,15 @@
 
   function buildPopup(poi) {
     const root = el("div", { class: "poi-popup" });
+    const category = categoryOf(poi);
+    if (category) {
+      root.append(el("span", { class: "cat-badge", style: `--cat:${safeColor(category.color)}` },
+        categoryBadgeIcon(category), category.name));
+    }
     root.append(el("h3", null, poi.title));
     if (poi.description) root.append(el("p", { class: "desc" }, poi.description));
-    if (poi.address) root.append(el("p", { class: "meta" }, icon("place"), el("span", null, poi.address)));
-    root.append(el("p", { class: "meta" }, icon("user"), el("span", null, `von ${poi.author}`)));
+    if (poi.address) root.append(el("p", { class: "meta" }, uiIcon("place"), el("span", null, poi.address)));
+    root.append(el("p", { class: "meta" }, uiIcon("user"), el("span", null, `von ${poi.author}`)));
 
     const actions = el("div", { class: "actions" },
       el("button", { type: "button", class: "btn btn-sm", onclick: () => startEdit(poi.id) }, "Bearbeiten"),
@@ -166,19 +239,30 @@
     return root;
   }
 
+  // Zeigt oder versteckt einen Marker je nach Filter und Bearbeitungszustand.
+  function syncMarker(id) {
+    const marker = markers.get(id);
+    const poi = pois.get(id);
+    if (!marker || !poi) return;
+    const show = !hiddenCategories.has(poi.category) && !(editing && editing.id === id);
+    if (show && !map.hasLayer(marker)) marker.addTo(map);
+    if (!show && map.hasLayer(marker)) marker.remove();
+    const element = marker.getElement();
+    if (element) element.setAttribute("title", poi.title);
+  }
+
   function upsertPoi(poi) {
     pois.set(poi.id, poi);
     let marker = markers.get(poi.id);
     if (marker) {
       marker.setLatLng([poi.lat, poi.lng]);
+      marker.setIcon(pinIcon(categoryOf(poi), false));
     } else {
-      marker = L.marker([poi.lat, poi.lng], { icon: pinIcon(false), riseOnHover: true })
-        .bindPopup(() => buildPopup(pois.get(poi.id)), { minWidth: 220, maxWidth: 280 })
-        .addTo(map);
+      marker = L.marker([poi.lat, poi.lng], { icon: pinIcon(categoryOf(poi), false), riseOnHover: true })
+        .bindPopup(() => buildPopup(pois.get(poi.id)), { minWidth: 220, maxWidth: 280 });
       markers.set(poi.id, marker);
     }
-    const element = marker.getElement();
-    if (element) element.setAttribute("title", poi.title);
+    syncMarker(poi.id);
   }
 
   function removePoi(id) {
@@ -186,6 +270,7 @@
     if (marker) marker.remove();
     markers.delete(id);
     pois.delete(id);
+    renderFilter();
   }
 
   async function deletePoi(id, button) {
@@ -205,14 +290,97 @@
     }
   }
 
-  async function loadPois() {
+  async function loadData() {
     try {
-      const list = await api("GET", "/api/pois");
-      list.forEach(upsertPoi);
+      const [categoryList, poiList] = await Promise.all([
+        api("GET", "/api/categories"),
+        api("GET", "/api/pois")
+      ]);
+      for (const category of categoryList) categories.set(category.id, category);
+      for (const id of [...hiddenCategories]) {
+        if (!categories.has(id)) hiddenCategories.delete(id);
+      }
+      renderCategoryOptions();
+      poiList.forEach(upsertPoi);
+      renderFilter();
     } catch (err) {
-      toast(`POIs konnten nicht geladen werden: ${err.message}`, true);
+      toast(`Daten konnten nicht geladen werden: ${err.message}`, true);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Filter
+  // -------------------------------------------------------------------------
+
+  function setFilterOpen(open) {
+    filterPanel.hidden = !open;
+    btnFilter.setAttribute("aria-expanded", String(open));
+  }
+
+  function renderFilter() {
+    const counts = new Map();
+    for (const poi of pois.values()) {
+      const id = categoryOf(poi) ? categoryOf(poi).id : poi.category;
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+
+    filterList.replaceChildren(...[...categories.values()].map((category) =>
+      el("li", null,
+        el("label", { class: "filter-item" },
+          el("input", {
+            type: "checkbox",
+            value: category.id,
+            checked: !hiddenCategories.has(category.id),
+            onchange: (e) => setCategoryVisible(category.id, e.target.checked)
+          }),
+          categoryBadgeIcon(category),
+          el("span", { class: "name" }, category.name),
+          el("span", { class: "count", "aria-label": `${counts.get(category.id) || 0} POIs` },
+            String(counts.get(category.id) || 0))
+        )
+      )
+    ));
+
+    filterDot.hidden = hiddenCategories.size === 0;
+    btnFilter.setAttribute("aria-label", hiddenCategories.size ? "Filter (aktiv)" : "Filter");
+  }
+
+  function applyFilter() {
+    storageSet(HIDDEN_KEY, JSON.stringify([...hiddenCategories]));
+    for (const id of markers.keys()) syncMarker(id);
+    filterDot.hidden = hiddenCategories.size === 0;
+    btnFilter.setAttribute("aria-label", hiddenCategories.size ? "Filter (aktiv)" : "Filter");
+  }
+
+  function setCategoryVisible(id, visible) {
+    if (visible) hiddenCategories.delete(id);
+    else hiddenCategories.add(id);
+    applyFilter();
+  }
+
+  btnFilter.addEventListener("click", () => {
+    const open = filterPanel.hidden;
+    if (open) setPicking(false);
+    setFilterOpen(open);
+  });
+
+  for (const button of filterPanel.querySelectorAll("[data-filter]")) {
+    button.addEventListener("click", () => {
+      hiddenCategories.clear();
+      if (button.dataset.filter === "none") {
+        for (const id of categories.keys()) hiddenCategories.add(id);
+      }
+      applyFilter();
+      renderFilter();
+    });
+  }
+
+  // Klick außerhalb schließt den Filter.
+  document.addEventListener("click", (e) => {
+    if (filterPanel.hidden) return;
+    if (filterPanel.contains(e.target) || btnFilter.contains(e.target)) return;
+    setFilterOpen(false);
+  });
 
   // -------------------------------------------------------------------------
   // Ort auswählen
@@ -231,6 +399,11 @@
       setPicking(false);
       return;
     }
+    if (categories.size === 0) {
+      toast("Die Kategorien sind noch nicht geladen. Bitte lade die Seite neu.", true);
+      return;
+    }
+    setFilterOpen(false);
     closeForm();
     map.closePopup();
     setPicking(true);
@@ -248,7 +421,8 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (picking) setPicking(false);
+    if (!filterPanel.hidden) setFilterOpen(false);
+    else if (picking) setPicking(false);
     else if (editing) closeForm();
   });
 
@@ -256,13 +430,42 @@
   // Formular
   // -------------------------------------------------------------------------
 
+  function renderCategoryOptions() {
+    categoryOptions.replaceChildren(...[...categories.values()].map((category) =>
+      el("label", { class: "cat-option" },
+        el("input", { type: "radio", name: "category", value: category.id }),
+        el("span", { class: "cat-chip", style: `--cat:${safeColor(category.color)}` },
+          categoryBadgeIcon(category),
+          el("span", { class: "name" }, category.name)
+        )
+      )
+    ));
+  }
+
+  function selectedCategory() {
+    const checked = form.querySelector('input[name="category"]:checked');
+    return checked ? categories.get(checked.value) : null;
+  }
+
+  function selectCategory(id) {
+    for (const input of form.querySelectorAll('input[name="category"]')) {
+      input.checked = input.value === id;
+    }
+  }
+
+  categoryOptions.addEventListener("change", () => {
+    categoryField.removeAttribute("aria-invalid");
+    if (editing) editing.draft.setIcon(pinIcon(selectedCategory(), true));
+  });
+
   function openForm(poi, latlng) {
     closeForm();
     map.closePopup();
 
     const id = poi ? poi.id : null;
+    const category = poi ? categoryOf(poi) : null;
     const draft = L.marker(latlng, {
-      icon: pinIcon(true),
+      icon: pinIcon(category, true),
       draggable: true,
       zIndexOffset: 1000,
       title: "Ziehen, um den Ort zu ändern"
@@ -270,22 +473,24 @@
     draft.on("dragend", () => moveDraft(draft.getLatLng()));
 
     // Beim Bearbeiten ersetzt der verschiebbare Marker den normalen.
-    if (id && markers.has(id)) markers.get(id).remove();
     editing = { id, draft };
+    if (id) syncMarker(id);
 
     const f = form.elements;
     form.reset();
+    selectCategory(category ? category.id : null);
     f.title.value = poi ? poi.title : "";
     f.description.value = poi ? poi.description : "";
     f.address.value = poi ? poi.address : "";
     f.author.value = poi ? poi.author : storageGet(AUTHOR_KEY) || "";
     f.address.placeholder = ADDRESS_PLACEHOLDER;
-    for (const input of form.querySelectorAll("[aria-invalid]")) input.removeAttribute("aria-invalid");
+    for (const node of form.querySelectorAll("[aria-invalid]")) node.removeAttribute("aria-invalid");
     panelTitle.textContent = id ? "POI bearbeiten" : "Neuer POI";
     addressHint.textContent = "";
     formError.hidden = true;
     addressTouched = false;
     panel.hidden = false;
+    panel.scrollTop = 0;
 
     if (!id) lookupAddress(latlng);
     keepVisible(latlng);
@@ -295,9 +500,10 @@
   function closeForm() {
     if (!editing) return;
     geocodeToken++;
-    editing.draft.remove();
-    if (editing.id && markers.has(editing.id)) markers.get(editing.id).addTo(map);
+    const { id, draft } = editing;
+    draft.remove();
     editing = null;
+    if (id) syncMarker(id);
     panel.hidden = true;
   }
 
@@ -353,18 +559,33 @@
     if (!editing) return;
 
     const f = form.elements;
+    const category = selectedCategory();
     const data = {
       title: f.title.value.trim(),
+      category: category ? category.id : "",
       description: f.description.value.trim(),
       address: f.address.value.trim(),
       author: f.author.value.trim()
     };
 
-    const missing = ["title", "author"].filter((name) => !data[name]);
-    for (const name of missing) f[name].setAttribute("aria-invalid", "true");
-    if (missing.length) {
-      showError("Bitte fülle Titel und Autor:in aus.");
-      f[missing[0]].focus();
+    const problems = [];
+    if (!data.title) {
+      f.title.setAttribute("aria-invalid", "true");
+      problems.push(["Titel", f.title]);
+    }
+    if (!category) {
+      categoryField.setAttribute("aria-invalid", "true");
+      problems.push(["Kategorie", categoryField.querySelector("input")]);
+    }
+    if (!data.author) {
+      f.author.setAttribute("aria-invalid", "true");
+      problems.push(["Autor:in", f.author]);
+    }
+    if (problems.length) {
+      const names = problems.map(([name]) => name);
+      const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} und ${names.at(-1)}` : names[0];
+      showError(`Bitte noch ausfüllen: ${list}.`);
+      problems[0][1].focus();
       return;
     }
 
@@ -379,10 +600,18 @@
         ? await api("PUT", `/api/pois/${encodeURIComponent(id)}`, data)
         : await api("POST", "/api/pois", data);
       storageSet(AUTHOR_KEY, data.author);
+
+      // Neue/geänderte POIs sollen sichtbar sein, auch wenn ihre Kategorie
+      // gerade ausgeblendet war.
+      const wasHidden = hiddenCategories.delete(saved.category);
+      if (wasHidden) applyFilter();
+
       closeForm();
       upsertPoi(saved);
+      renderFilter();
       markers.get(saved.id).openPopup();
-      toast(id ? "Änderungen gespeichert" : "POI angelegt");
+      const message = id ? "Änderungen gespeichert" : "POI angelegt";
+      toast(wasHidden ? `${message} – Kategorie „${category.name}“ wird wieder angezeigt` : message);
     } catch (err) {
       if (err.status === 404 && id) {
         closeForm();
@@ -425,5 +654,5 @@
     });
   }
 
-  loadPois();
+  loadData();
 })();

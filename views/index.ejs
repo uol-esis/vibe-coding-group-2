@@ -25,6 +25,12 @@
     </a>
 
     <div class="nav-actions">
+      <button type="button" id="btn-filter" class="btn" aria-expanded="false" aria-controls="filter-panel"
+              aria-label="Filter">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>
+        <span class="btn-label">Filter</span>
+        <span class="filter-dot" id="filter-dot" hidden></span>
+      </button>
       <button type="button" id="btn-new-poi" class="btn btn-primary" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         <span class="btn-label">Neuer POI</span>
@@ -38,6 +44,17 @@
     <div id="pick-hint" class="pick-hint" role="status" hidden>
       Tippe auf die Karte, um den Ort für den neuen POI zu wählen.
     </div>
+
+    <section id="filter-panel" class="popover" aria-labelledby="filter-title" hidden>
+      <div class="popover-head">
+        <h2 id="filter-title">Kategorien</h2>
+        <div class="popover-tools">
+          <button type="button" class="link-btn" data-filter="all">Alle</button>
+          <button type="button" class="link-btn" data-filter="none">Keine</button>
+        </div>
+      </div>
+      <ul id="filter-list" class="filter-list"></ul>
+    </section>
 
     <aside id="poi-panel" class="panel" aria-labelledby="poi-panel-title" hidden>
       <form id="poi-form" novalidate>
@@ -53,6 +70,11 @@
           <input name="title" type="text" maxlength="120" required autocomplete="off"
                  placeholder="z. B. Lieblingscafé am Marktplatz">
         </label>
+
+        <fieldset class="field" id="category-field">
+          <legend>Kategorie <em>*</em></legend>
+          <div class="category-grid" id="category-options"></div>
+        </fieldset>
 
         <label class="field">
           <span>Beschreibung</span>
