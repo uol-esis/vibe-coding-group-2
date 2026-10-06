@@ -149,7 +149,8 @@ body {
 .poi-popup .meta svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 2px; fill: none; stroke: currentColor; stroke-width: 2; }
 .poi-popup .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .poi-popup .confirm { margin-top: 12px; padding: 10px; border-radius: 8px; background: var(--accent-soft); }
-.poi-popup .confirm .actions { margin-top: 0; }
+.poi-popup .confirm .actions { margin-top: 0; gap: 6px; }
+.poi-popup .confirm .btn-sm { padding: 0 10px; }
 .poi-popup .confirm p { margin: 0 0 8px; font-weight: 600; }
 
 .cat-badge {

@@ -214,26 +214,28 @@
 
     const actions = el("div", { class: "actions" },
       el("button", { type: "button", class: "btn btn-sm", onclick: () => startEdit(poi.id) }, "Bearbeiten"),
-      el("button", { type: "button", class: "btn btn-sm", onclick: askDelete }, "Löschen")
+      el("button", { type: "button", class: "btn btn-sm", onclick: () => showConfirm(true) }, "Löschen")
     );
-    root.append(actions);
 
-    // Sicherheitsabfrage direkt im Popup
-    function askDelete() {
-      const btnConfirm = el("button", {
-        type: "button",
-        class: "btn btn-sm btn-danger",
-        onclick: () => deletePoi(poi.id, btnConfirm)
-      }, "Ja, löschen");
-      const confirmBox = el("div", { class: "confirm" },
-        el("p", null, "Diesen POI wirklich löschen?"),
-        el("div", { class: "actions" },
-          btnConfirm,
-          el("button", { type: "button", class: "btn btn-sm", onclick: () => confirmBox.replaceWith(actions) }, "Abbrechen")
-        )
-      );
-      actions.replaceWith(confirmBox);
-      btnConfirm.focus();
+    // Sicherheitsabfrage direkt im Popup. Die Buttons werden nur ein- und
+    // ausgeblendet, nicht ersetzt: Leaflet schließt das Popup sonst, weil der
+    // geklickte Button nicht mehr im Popup hängt.
+    const btnConfirm = el("button", {
+      type: "button",
+      class: "btn btn-sm btn-danger",
+      onclick: () => deletePoi(poi.id, btnConfirm)
+    }, "Ja, löschen");
+    const btnCancel = el("button", { type: "button", class: "btn btn-sm", onclick: () => showConfirm(false) }, "Abbrechen");
+    const confirmBox = el("div", { class: "confirm", hidden: true },
+      el("p", null, "Diesen POI wirklich löschen?"),
+      el("div", { class: "actions" }, btnConfirm, btnCancel)
+    );
+    root.append(actions, confirmBox);
+
+    function showConfirm(show) {
+      actions.hidden = show;
+      confirmBox.hidden = !show;
+      if (show) btnConfirm.focus();
     }
 
     return root;
